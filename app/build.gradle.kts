@@ -14,6 +14,11 @@ android {
         targetSdk = 35
         versionCode = 2
         versionName = "0.2.0"
+
+        ndk {
+            // 现代 Android 设备均为 arm64；只保留 arm64 可显著减小 APK
+            abiFilters += "arm64-v8a"
+        }
     }
 
     buildTypes {
