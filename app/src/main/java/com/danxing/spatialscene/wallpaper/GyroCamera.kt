@@ -6,65 +6,64 @@ import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
 import android.hardware.SensorManager
 import kotlin.math.abs
-import kotlin.math.exp
-import kotlin.math.sign
 import kotlin.math.sqrt
 
 /**
- * 把设备姿态（旋转矢量）转换成平滑的虚拟相机偏移。
+ * 姿态 → 虚拟相机偏移。
  *
- * 轴映射（M5 修正）：
- * - 左右：使用「侧倾 roll」而不是 yaw —— 用户左右倾斜手机时一眼就能看到反应；
- *   yaw 仅贡献很小一部分，避免旋转手机时画面乱窜。
- * - 上下：使用「俯仰 pitch」。
- * 横向/纵向的像素级均衡由渲染器按屏幕宽高比补偿（竖屏时纵向 NDC 位移更显眼）。
+ * 使用**重力向量**（TYPE_GRAVITY，融合传感器，无漂移）而不是陀螺仪积分：
+ * - 水平 = 重力 x 分量相对参考姿态的变化（左右侧倾）
+ * - 垂直 = 重力 z 分量相对参考姿态的变化（上下俯仰）
+ * 这样任何方向的倾斜都会立刻响应，且不会因为陀螺仪积分而"卡住/漂移"。
  *
- * 静止回中：一段时间没有姿态变化后，目标值缓慢衰减到 0，画面自动回正。
+ * 静止回中：检测到姿态稳定一段时间后，把**参考姿态**缓慢移向当前姿态，
+ * 于是目标偏移自然衰减到 0，画面回正（不会与传感器打架）。
  */
 class GyroCamera(context: Context) : SensorEventListener {
 
     private val sensorManager =
         context.getSystemService(Context.SENSOR_SERVICE) as SensorManager
 
-    private val rotationSensor: Sensor? =
-        sensorManager.getDefaultSensor(Sensor.TYPE_GAME_ROTATION_VECTOR)
-            ?: sensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
+    private val gravitySensor: Sensor? =
+        sensorManager.getDefaultSensor(Sensor.TYPE_GRAVITY)
+            ?: sensorManager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
 
-    /** 灵敏度：每弧度旋转对应的 NDC 偏移量（由渲染器按用户设置调整） */
+    private val usesRawAccelerometer: Boolean
+        get() = gravitySensor?.type == Sensor.TYPE_ACCELEROMETER
+
+    /** 灵敏度：重力分量变化 1.0（约 90°）对应的 NDC 偏移 */
     @Volatile
-    var sensitivity = 0.55f
+    var sensitivity = 0.6f
 
-    /** 相机偏移的宽松上限（真正的安全 clamp 在渲染器里按画布边距计算） */
     private val maxOffset = 0.30f
 
-    /** 死区：忽略约 0.35° 以下的微抖动 */
-    private val deadZone = 0.006f
-
-    /** 二阶临界阻尼弹簧：比 M0 更快跟手 */
+    /** 二阶临界阻尼弹簧 */
     private val stiffness = 150f
     private val damping = 2f * sqrt(stiffness)
 
-    /** 静止判定与回中 */
-    private val stillThreshold = 0.004f
-    private val stillDelay = 1.1f
-    private val recenterTau = 0.5f
+    /** 静止判定：当前姿态与慢速跟随值的偏差 */
+    private val motionThreshold = 0.035f
+    private val recenterDelay = 1.0f
+    private val recenterRate = 0.05f
 
-    // 目标值（传感器线程写入）
     @Volatile private var targetX = 0f
     @Volatile private var targetY = 0f
 
-    // 平滑值（渲染线程读写）
     private var x = 0f
     private var y = 0f
     private var vx = 0f
     private var vy = 0f
 
-    private var stillTime = 0f
+    @Volatile private var stillTime = 0f
 
-    private val refMatrix = FloatArray(9)
-    private val curMatrix = FloatArray(9)
-    private val deltaMatrix = FloatArray(9)
+    private val refGravity = FloatArray(3)
+    private val curGravity = FloatArray(3)
+    private val filtered = FloatArray(3)
     private var hasReference = false
+    private var filterInitialized = false
+
+    private var slowX = 0f
+    private var slowY = 0f
 
     val cameraX: Float get() = x
     val cameraY: Float get() = y
@@ -75,85 +74,77 @@ class GyroCamera(context: Context) : SensorEventListener {
             hasReference = false
             return
         }
-        val sensor = rotationSensor ?: return
+        val sensor = gravitySensor ?: return
         sensorManager.registerListener(this, sensor, SensorManager.SENSOR_DELAY_GAME)
     }
 
-    /** 回到中位（切回屏幕时避免上一次姿态造成的跳变） */
     fun reset() {
         targetX = 0f
         targetY = 0f
         hasReference = false
         stillTime = 0f
+        slowX = 0f
+        slowY = 0f
     }
 
     override fun onSensorChanged(event: SensorEvent) {
-        val type = event.sensor.type
-        if (type != Sensor.TYPE_GAME_ROTATION_VECTOR &&
-            type != Sensor.TYPE_ROTATION_VECTOR
+        if (event.sensor.type != Sensor.TYPE_GRAVITY &&
+            event.sensor.type != Sensor.TYPE_ACCELEROMETER
         ) return
 
-        SensorManager.getRotationMatrixFromVector(curMatrix, event.values)
+        val raw = event.values
+        val magnitude = sqrt(raw[0] * raw[0] + raw[1] * raw[1] + raw[2] * raw[2])
+        if (magnitude < 0.1f) return
+
+        if (usesRawAccelerometer) {
+            // 加速度计含运动分量，做低通滤波近似重力
+            val a = if (!filterInitialized) 1f else 0.15f
+            if (!filterInitialized) filterInitialized = true
+            for (i in 0..2) filtered[i] += (raw[i] / magnitude - filtered[i]) * a
+            for (i in 0..2) curGravity[i] = filtered[i]
+        } else {
+            for (i in 0..2) curGravity[i] = raw[i] / magnitude
+        }
 
         if (!hasReference) {
-            System.arraycopy(curMatrix, 0, refMatrix, 0, 9)
+            System.arraycopy(curGravity, 0, refGravity, 0, 3)
             hasReference = true
             return
         }
 
-        multiplyTranspose(refMatrix, curMatrix, deltaMatrix)
+        // 相对参考姿态的重力变化 → 倾斜量
+        val tiltX = -(curGravity[0] - refGravity[0])
+        val tiltY = -(curGravity[2] - refGravity[2])
 
-        // 从相对旋转矩阵中提取小角度（设备坐标系，delta ≈ I + [w]×）
-        val pitch = applyDeadZone(0.5f * (deltaMatrix[7] - deltaMatrix[5])) // 绕设备 x 轴：抬头/低头
-        val yaw = applyDeadZone(0.5f * (deltaMatrix[2] - deltaMatrix[6]))   // 绕设备 y 轴：左右转动
-        val roll = applyDeadZone(0.5f * (deltaMatrix[3] - deltaMatrix[1]))  // 绕设备 z 轴：左右侧倾
-
-        // 水平 = 侧倾为主 + 少量 yaw；垂直 = 俯仰
-        targetX = ((roll + yaw * YAW_WEIGHT) * sensitivity).coerceIn(-maxOffset, maxOffset)
-        targetY = (pitch * sensitivity).coerceIn(-maxOffset, maxOffset)
-
-        if (abs(pitch) > stillThreshold || abs(roll) > stillThreshold) {
+        // 运动检测：与慢速跟随值的偏差
+        slowX += (tiltX - slowX) * 0.03f
+        slowY += (tiltY - slowY) * 0.03f
+        val motion = abs(tiltX - slowX) + abs(tiltY - slowY)
+        if (motion > motionThreshold) {
             stillTime = 0f
         }
+
+        // 静止回中：把参考姿态缓慢移向当前姿态
+        if (stillTime > recenterDelay) {
+            for (i in 0..2) {
+                refGravity[i] += (curGravity[i] - refGravity[i]) * recenterRate
+            }
+        }
+
+        targetX = (tiltX * sensitivity).coerceIn(-maxOffset, maxOffset)
+        targetY = (tiltY * sensitivity).coerceIn(-maxOffset, maxOffset)
     }
 
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
 
-    /** 推进弹簧模拟与静止回中，[dt] 为秒。每个渲染帧调用一次。 */
+    /** 推进弹簧与静止计时，[dt] 为秒。每个渲染帧调用一次。 */
     fun step(dt: Float) {
         val d = dt.coerceIn(0f, 0.05f)
-
         stillTime += d
-        if (stillTime > stillDelay) {
-            // 静止一段时间后缓慢回中（很多动态壁纸都这样做）
-            val decay = exp(-d / recenterTau)
-            targetX *= decay
-            targetY *= decay
-        }
 
         vx += ((targetX - x) * stiffness - damping * vx) * d
         vy += ((targetY - y) * stiffness - damping * vy) * d
         x = (x + vx * d).coerceIn(-maxOffset, maxOffset)
         y = (y + vy * d).coerceIn(-maxOffset, maxOffset)
-    }
-
-    private fun multiplyTranspose(a: FloatArray, b: FloatArray, out: FloatArray) {
-        for (r in 0..2) {
-            for (c in 0..2) {
-                var sum = 0f
-                for (k in 0..2) {
-                    sum += a[k * 3 + r] * b[k * 3 + c]
-                }
-                out[r * 3 + c] = sum
-            }
-        }
-    }
-
-    private fun applyDeadZone(value: Float): Float =
-        if (abs(value) < deadZone) 0f else value - deadZone * sign(value)
-
-    companion object {
-        /** yaw 的权重（仅作为侧倾的补充，避免旋转手机时画面乱窜） */
-        private const val YAW_WEIGHT = 0.12f
     }
 }
