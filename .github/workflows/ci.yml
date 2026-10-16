@@ -3,6 +3,7 @@ name: CI
 on:
   push:
     branches: [ main ]
+    tags: [ 'v*' ]
   pull_request:
   workflow_dispatch:
 
@@ -35,19 +36,24 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
-      - name: Cache depth model
+      - name: Cache on-device models
         uses: actions/cache@v4
         with:
           path: app/src/main/assets/models
-          key: depth-model-da2s-fp16-v2
+          key: models-da2s-fp16-migan-v3
 
-      - name: Fetch depth model
+      - name: Fetch models
         run: bash scripts/fetch_models.sh
 
-      - name: Validate depth model (CPU sanity check)
+      - name: Validate models (CPU sanity check)
         run: |
           python3 -m pip install --quiet onnxruntime numpy
           python3 scripts/validate_model.py app/src/main/assets/models/depth_anything_v2_small_fp16.onnx
+          python3 scripts/validate_model.py app/src/main/assets/models/migan_pipeline_v2.onnx
+
+      - name: Read version name
+        id: version
+        run: echo "name=$(grep -oP 'versionName = "\K[^"]+' app/build.gradle.kts)" >> "$GITHUB_OUTPUT"
 
       - name: Ensure Gradle wrapper
         run: |
@@ -85,14 +91,38 @@ jobs:
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.name }}
         run: |
-          cp app/build/outputs/apk/debug/app-debug.apk /tmp/spatial-scene-debug.apk
-          if gh release view latest >/dev/null 2>&1; then
-            gh release upload latest /tmp/spatial-scene-debug.apk --clobber
-            gh release edit latest --notes "自动更新的最新构建 · commit ${GITHUB_SHA::7} · $(date -u +%Y-%m-%dT%H:%MZ)"
-          else
-            gh release create latest /tmp/spatial-scene-debug.apk \
+          ASSET="spatial-scene-v${VERSION}-debug.apk"
+          cp app/build/outputs/apk/debug/app-debug.apk "/tmp/$ASSET"
+          if ! gh release view latest >/dev/null 2>&1; then
+            gh release create latest \
               --title "Latest debug build" \
               --prerelease \
-              --notes "自动更新的最新构建 · commit ${GITHUB_SHA::7}"
+              --notes "自动更新的最新构建；文件名带版本号，可直接下载历史版本：见 Releases"
+          fi
+          # 清掉旧资产，只保留最新一个
+          for old in $(gh release view latest --json assets --jq '.assets[].name'); do
+            gh release delete-asset latest "$old" --yes || true
+          done
+          gh release upload latest "/tmp/$ASSET"
+          gh release edit latest \
+            --notes "最新滚动构建 · v${VERSION} · commit ${GITHUB_SHA::7} · $(date -u +%Y-%m-%dT%H:%MZ)"
+
+      - name: Publish tagged milestone release
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ASSET="spatial-scene-${GITHUB_REF_NAME}-debug.apk"
+          cp app/build/outputs/apk/debug/app-debug.apk "/tmp/$ASSET"
+          NOTES="里程碑构建 ${GITHUB_REF_NAME} · commit ${GITHUB_SHA::7}
+
+          安装说明：首次安装如遇“签名冲突”，先卸载旧版；此后所有版本共用同一密钥，可直接覆盖升级。"
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            gh release upload "${GITHUB_REF_NAME}" "/tmp/$ASSET" --clobber
+          else
+            gh release create "${GITHUB_REF_NAME}" "/tmp/$ASSET" \
+              --title "${GITHUB_REF_NAME}" \
+              --notes "$NOTES"
           fi
