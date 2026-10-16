@@ -579,7 +579,11 @@ private fun SettingsTab() {
         }
 
         Spacer(Modifier.height(4.dp))
-        WallpaperButtons(context)
+        Text(
+            text = "动态壁纸的设置入口在「场景库」页底部。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
     }
 }
 
