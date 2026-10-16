@@ -55,9 +55,7 @@ class GlRenderThread(
 
     private var imageTexture = 0
     private var depthTexture = 0
-    private var bgImageTexture = 0
-    private var bgDepthTexture = 0
-    private var fgAlphaTexture = 0
+    private var layerTextures = ArrayList<LayerTextures>()
     private var scene: Scene? = null
     private var loadedSceneId: String? = null
 
@@ -70,7 +68,8 @@ class GlRenderThread(
 
     private var lastCamX = Float.NaN
     private var lastCamY = Float.NaN
-    private var lastCamRoll = Float.NaN
+
+    private class LayerTextures(val image: Int, val alpha: Int)
 
     fun setVisible(value: Boolean) {
         visible = value
@@ -112,7 +111,6 @@ class GlRenderThread(
                         }
                         lastCamX = camera.cameraX
                         lastCamY = camera.cameraY
-                        lastCamRoll = camera.cameraRoll
                         needsDraw = false
                         sleep(5)
                     } else {
@@ -268,25 +266,26 @@ class GlRenderThread(
             depth.recycle()
 
             if (target.layered) {
-                val bg = BitmapFactory.decodeFile(target.bgImagePath)
-                val bgDepth = BitmapFactory.decodeFile(target.bgDepthPath)
-                val fgAlpha = BitmapFactory.decodeFile(target.fgAlphaPath)
-                if (bg != null && bgDepth != null && fgAlpha != null) {
-                    bgImageTexture = GlCore.loadTexture(bg, mipmaps = true)
-                    bgDepthTexture = GlCore.loadTexture(bgDepth, mipmaps = false)
-                    fgAlphaTexture = GlCore.loadTexture(fgAlpha, mipmaps = false)
-                    bg.recycle()
-                    bgDepth.recycle()
-                    fgAlpha.recycle()
-                } else {
-                    Log.w(TAG, "分层贴图加载失败，回退单层渲染")
+                for (layer in target.layers) {
+                    val layerImage = BitmapFactory.decodeFile(layer.imagePath)
+                    val layerAlpha = BitmapFactory.decodeFile(layer.alphaPath)
+                    if (layerImage == null || layerAlpha == null) {
+                        Log.w(TAG, "图层贴图加载失败，回退单层渲染")
+                        layerTextures.clear()
+                        break
+                    }
+                    val imageId = GlCore.loadTexture(layerImage, mipmaps = true)
+                    val alphaId = GlCore.loadTexture(layerAlpha, mipmaps = false)
+                    layerTextures.add(LayerTextures(imageId, alphaId))
+                    layerImage.recycle()
+                    layerAlpha.recycle()
                 }
             }
 
             Log.i(
                 TAG,
                 "场景已加载: ${target.name} (${target.imageWidth}x${target.imageHeight}) " +
-                    "layered=${target.layered && bgImageTexture != 0}"
+                    "layers=${layerTextures.size}"
             )
         } catch (t: Throwable) {
             Log.e(TAG, "加载场景失败", t)
@@ -304,25 +303,17 @@ class GlRenderThread(
             GlCore.deleteTexture(depthTexture)
             depthTexture = 0
         }
-        if (bgImageTexture != 0) {
-            GlCore.deleteTexture(bgImageTexture)
-            bgImageTexture = 0
+        for (layer in layerTextures) {
+            GlCore.deleteTexture(layer.image)
+            GlCore.deleteTexture(layer.alpha)
         }
-        if (bgDepthTexture != 0) {
-            GlCore.deleteTexture(bgDepthTexture)
-            bgDepthTexture = 0
-        }
-        if (fgAlphaTexture != 0) {
-            GlCore.deleteTexture(fgAlphaTexture)
-            fgAlphaTexture = 0
-        }
+        layerTextures.clear()
     }
 
     private fun cameraMoved(): Boolean {
         if (lastCamX.isNaN()) return true
         return abs(camera.cameraX - lastCamX) > MOTION_EPSILON ||
-            abs(camera.cameraY - lastCamY) > MOTION_EPSILON ||
-            abs(camera.cameraRoll - lastCamRoll) > MOTION_EPSILON
+            abs(camera.cameraY - lastCamY) > MOTION_EPSILON
     }
 
     private fun draw() {
@@ -332,8 +323,8 @@ class GlRenderThread(
 
         val mesh = grid ?: return
         val current = scene
-        if (current == null || imageTexture == 0 || depthTexture == 0) {
-            proceduralProgram?.draw(mesh, camera.cameraX, camera.cameraY, camera.cameraRoll)
+        if (current == null || imageTexture == 0) {
+            proceduralProgram?.draw(mesh, camera.cameraX, camera.cameraY, 0f)
             return
         }
 
@@ -350,33 +341,33 @@ class GlRenderThread(
         scaleX *= current.zoom
         scaleY *= current.zoom
 
-        // 防露边：位移不超过四周安全边距（位移 = |cam| * d * parallax，d <= 1）
-        val margin = min(
-            scaleX - 1f - abs(current.offsetX),
-            scaleY - 1f - abs(current.offsetY)
-        )
-        val maxCam = (margin * 0.9f / max(parallax, 0.05f)).coerceAtLeast(0f)
-        val camX = camera.cameraX.coerceIn(-maxCam, maxCam)
-        val camY = camera.cameraY.coerceIn(-maxCam, maxCam)
+        // 防露边：按轴 clamp；纵向按屏幕宽高比补偿，让横竖手感一致
+        val aspectWH = viewportWidth.toFloat() / max(viewportHeight, 1).toFloat()
+        val marginX = (scaleX - 1f - abs(current.offsetX)).coerceAtLeast(0f)
+        val marginY = (scaleY - 1f - abs(current.offsetY)).coerceAtLeast(0f)
+        val clipX = marginX * 0.9f / max(parallax, 0.05f)
+        val clipY = marginY * 0.9f / max(parallax, 0.05f)
+        val camX = camera.cameraX.coerceIn(-clipX, clipX)
+        val camY = (camera.cameraY * aspectWH).coerceIn(-clipY, clipY)
 
-        if (current.layered && bgImageTexture != 0 && bgDepthTexture != 0 && fgAlphaTexture != 0) {
-            // 背景层：补全后的背景板 + 背景深度
-            photoProgram?.draw(
-                mesh, bgImageTexture, bgDepthTexture, 0,
-                scaleX, scaleY, current.offsetX, current.offsetY,
-                camX, camY, parallax, depthGamma
-            )
-            // 前景层：原照片 + 羽化 alpha + 常数深度（刚性平移，无波浪纹）
+        if (current.layered && layerTextures.size == current.layers.size) {
+            // 分层渲染：从最远层到最近层依次绘制（近层带羽化 alpha）
             GLES30.glEnable(GLES30.GL_BLEND)
             GLES30.glBlendFunc(GLES30.GL_SRC_ALPHA, GLES30.GL_ONE_MINUS_SRC_ALPHA)
-            photoProgram?.draw(
-                mesh, imageTexture, 0, fgAlphaTexture,
-                scaleX, scaleY, current.offsetX, current.offsetY,
-                camX, camY, parallax, depthGamma,
-                constantDepth = current.fgDepth, useAlpha = true
-            )
+            val lastIndex = layerTextures.lastIndex
+            for (index in lastIndex downTo 0) {
+                val textures = layerTextures[index]
+                photoProgram?.draw(
+                    mesh, textures.image, 0, textures.alpha,
+                    scaleX, scaleY, current.offsetX, current.offsetY,
+                    camX, camY, parallax, depthGamma,
+                    constantDepth = current.layers[index].depth,
+                    useAlpha = index != lastIndex
+                )
+            }
             GLES30.glDisable(GLES30.GL_BLEND)
         } else {
+            if (depthTexture == 0) return
             photoProgram?.draw(
                 mesh, imageTexture, depthTexture, 0,
                 scaleX, scaleY, current.offsetX, current.offsetY,

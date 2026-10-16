@@ -41,7 +41,7 @@ class SceneStore private constructor(private val context: Context) {
         image: Bitmap,
         depth: Bitmap,
         thumb: Bitmap,
-        layers: LayerDecomposer.Layers? = null
+        layers: List<LayerDecomposer.Layer>? = null
     ): Scene {
         val id = UUID.randomUUID().toString()
         val dir = File(root, id).apply { mkdirs() }
@@ -53,28 +53,23 @@ class SceneStore private constructor(private val context: Context) {
         depthFile.outputStream().use { depth.compress(Bitmap.CompressFormat.PNG, 100, it) }
         thumbFile.outputStream().use { thumb.compress(Bitmap.CompressFormat.JPEG, 85, it) }
 
-        var bgImagePath = ""
-        var bgDepthPath = ""
-        var fgAlphaPath = ""
-        var fgDepth = 0f
-
-        if (layers != null) {
-            val bgImageFile = File(dir, "bg.jpg")
-            val bgDepthFile = File(dir, "bg_depth.png")
-            val fgAlphaFile = File(dir, "fg_alpha.png")
-            bgImageFile.outputStream().use {
-                layers.backgroundImage.compress(Bitmap.CompressFormat.JPEG, 92, it)
+        val sceneLayers = ArrayList<SceneLayer>()
+        layers?.forEachIndexed { index, layer ->
+            val layerImage = File(dir, "layer_${index}.jpg")
+            val layerAlpha = File(dir, "layer_${index}_alpha.png")
+            layerImage.outputStream().use {
+                layer.image.compress(Bitmap.CompressFormat.JPEG, 92, it)
             }
-            bgDepthFile.outputStream().use {
-                layers.backgroundDepth.compress(Bitmap.CompressFormat.PNG, 100, it)
+            layerAlpha.outputStream().use {
+                layer.alpha.compress(Bitmap.CompressFormat.PNG, 100, it)
             }
-            fgAlphaFile.outputStream().use {
-                layers.foregroundAlpha.compress(Bitmap.CompressFormat.PNG, 100, it)
-            }
-            bgImagePath = bgImageFile.absolutePath
-            bgDepthPath = bgDepthFile.absolutePath
-            fgAlphaPath = fgAlphaFile.absolutePath
-            fgDepth = layers.foregroundDepth
+            sceneLayers.add(
+                SceneLayer(
+                    imagePath = layerImage.absolutePath,
+                    alphaPath = layerAlpha.absolutePath,
+                    depth = layer.depth
+                )
+            )
         }
 
         val scene = Scene(
@@ -89,10 +84,7 @@ class SceneStore private constructor(private val context: Context) {
             zoom = 1.12f,
             offsetX = 0f,
             offsetY = 0f,
-            bgImagePath = bgImagePath,
-            bgDepthPath = bgDepthPath,
-            fgAlphaPath = fgAlphaPath,
-            fgDepth = fgDepth
+            layers = sceneLayers
         )
         writeList(list() + scene)
         setActive(scene.id)

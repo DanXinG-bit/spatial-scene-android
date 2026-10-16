@@ -122,7 +122,7 @@ private fun PhotoTab() {
     var estimator by remember { mutableStateOf<DepthEstimator?>(null) }
     var original by remember { mutableStateOf<Bitmap?>(null) }
     var depthBitmap by remember { mutableStateOf<Bitmap?>(null) }
-    var layers by remember { mutableStateOf<LayerDecomposer.Layers?>(null) }
+    var layers by remember { mutableStateOf<List<LayerDecomposer.Layer>?>(null) }
     var showDepth by remember { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }
     var status by remember { mutableStateOf<String?>(null) }
@@ -483,6 +483,19 @@ private fun SceneCard(
                             color = MaterialTheme.colorScheme.primary
                         )
                     }
+                    Text(
+                        text = if (scene.layered) {
+                            "分层视差 ×${scene.layers.size}（无波浪纹）"
+                        } else {
+                            "单层视差（旧场景，建议重新生成）"
+                        },
+                        style = MaterialTheme.typography.labelMedium,
+                        color = if (scene.layered) {
+                            MaterialTheme.colorScheme.primary
+                        } else {
+                            MaterialTheme.colorScheme.onSurfaceVariant
+                        }
+                    )
                 }
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {

@@ -1,9 +1,37 @@
 package com.danxing.spatialscene.scene
 
+import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * 一个保存下来的空间场景：原图 + 深度图 + 缩略图 + 变换参数。
+ * 场景中的一层（LDI 切片）：颜色 + 羽化 alpha + 平面深度。
+ */
+data class SceneLayer(
+    val imagePath: String,
+    val alphaPath: String,
+    val depth: Float
+) {
+    fun toJson(): JSONObject = JSONObject().apply {
+        put("imagePath", imagePath)
+        put("alphaPath", alphaPath)
+        put("depth", depth.toDouble())
+    }
+
+    companion object {
+        fun fromJson(json: JSONObject): SceneLayer? = try {
+            SceneLayer(
+                imagePath = json.getString("imagePath"),
+                alphaPath = json.getString("alphaPath"),
+                depth = json.optDouble("depth", 0.5).toFloat()
+            )
+        } catch (t: Throwable) {
+            null
+        }
+    }
+}
+
+/**
+ * 一个保存下来的空间场景：原图 + 深度图 + 缩略图 + 变换参数 + 分层切片。
  */
 data class Scene(
     val id: String,
@@ -17,15 +45,11 @@ data class Scene(
     val zoom: Float,
     val offsetX: Float,
     val offsetY: Float,
-    // 分层场景（LDI）：前景主体 + 补全后的背景板
-    val bgImagePath: String = "",
-    val bgDepthPath: String = "",
-    val fgAlphaPath: String = "",
-    val fgDepth: Float = 0f
+    /** LDI 分层（index 0 = 最近层）。为空表示单层场景（旧版本保存的）。 */
+    val layers: List<SceneLayer> = emptyList()
 ) {
-    /** 是否为分层（LDI）场景 */
     val layered: Boolean
-        get() = bgImagePath.isNotEmpty() && fgAlphaPath.isNotEmpty()
+        get() = layers.size >= 2
 
     val imageAspect: Float
         get() = if (imageHeight == 0) 1f else imageWidth.toFloat() / imageHeight
@@ -45,14 +69,18 @@ data class Scene(
         put("zoom", zoom.toDouble())
         put("offsetX", offsetX.toDouble())
         put("offsetY", offsetY.toDouble())
-        put("bgImagePath", bgImagePath)
-        put("bgDepthPath", bgDepthPath)
-        put("fgAlphaPath", fgAlphaPath)
-        put("fgDepth", fgDepth.toDouble())
+        put("layers", JSONArray().apply { layers.forEach { put(it.toJson()) } })
     }
 
     companion object {
         fun fromJson(json: JSONObject): Scene? = try {
+            val layerArray = json.optJSONArray("layers")
+            val layers = ArrayList<SceneLayer>()
+            if (layerArray != null) {
+                for (i in 0 until layerArray.length()) {
+                    SceneLayer.fromJson(layerArray.getJSONObject(i))?.let { layers.add(it) }
+                }
+            }
             Scene(
                 id = json.getString("id"),
                 name = json.optString("name", "未命名"),
@@ -65,10 +93,7 @@ data class Scene(
                 zoom = json.optDouble("zoom", 1.12).toFloat(),
                 offsetX = json.optDouble("offsetX", 0.0).toFloat(),
                 offsetY = json.optDouble("offsetY", 0.0).toFloat(),
-                bgImagePath = json.optString("bgImagePath", ""),
-                bgDepthPath = json.optString("bgDepthPath", ""),
-                fgAlphaPath = json.optString("fgAlphaPath", ""),
-                fgDepth = json.optDouble("fgDepth", 0.0).toFloat()
+                layers = layers
             )
         } catch (t: Throwable) {
             null
