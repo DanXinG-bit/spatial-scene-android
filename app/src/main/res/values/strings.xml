@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">空间场景</string>
+    <string name="wallpaper_description">随重力与陀螺仪产生景深视差的动态壁纸</string>
+</resources>
