@@ -71,9 +71,11 @@ class DepthEstimator(context: Context) {
 
         val runStart = SystemClock.elapsedRealtime()
         val depth: FloatArray = synchronized(this) {
+            // 注意：模型输入为 NCHW，必须传 [1, 3, H, W]；
+            // 曾误写为 [1, 3, W, H] 导致图像被转置，输出退化成条纹渐变。
             OnnxTensor.createTensor(
                 env, floatBuffer,
-                longArrayOf(1, 3, netWidth.toLong(), netHeight.toLong())
+                longArrayOf(1, 3, netHeight.toLong(), netWidth.toLong())
             ).use { input ->
                 session.run(mapOf(inputName to input)).use { result ->
                     val tensor = result[0] as OnnxTensor
