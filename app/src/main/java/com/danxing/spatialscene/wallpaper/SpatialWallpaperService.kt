@@ -27,7 +27,9 @@ class SpatialWallpaperService : WallpaperService() {
         override fun onSurfaceCreated(holder: SurfaceHolder) {
             super.onSurfaceCreated(holder)
             if (renderThread == null) {
-                renderThread = GlRenderThread(holder, camera).also { it.start() }
+                renderThread = GlRenderThread(
+                    this@SpatialWallpaperService.applicationContext, holder, camera
+                ).also { it.start() }
             }
         }
 
@@ -35,7 +37,9 @@ class SpatialWallpaperService : WallpaperService() {
             super.onVisibilityChanged(visible)
             renderThread?.setVisible(visible)
             camera.setSensorActive(visible)
-            if (!visible) {
+            if (visible) {
+                renderThread?.requestRedraw()
+            } else {
                 camera.reset()
             }
         }

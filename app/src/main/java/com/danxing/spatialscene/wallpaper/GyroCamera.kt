@@ -24,11 +24,12 @@ class GyroCamera(context: Context) : SensorEventListener {
         sensorManager.getDefaultSensor(Sensor.TYPE_GAME_ROTATION_VECTOR)
             ?: sensorManager.getDefaultSensor(Sensor.TYPE_ROTATION_VECTOR)
 
-    /** 灵敏度：每弧度旋转对应的 NDC 偏移量 */
-    private val sensitivity = 0.30f
+    /** 灵敏度：每弧度旋转对应的 NDC 偏移量（由渲染器按用户设置调整） */
+    @Volatile
+    var sensitivity = 0.45f
 
-    /** 相机偏移硬上限，确保永远不会露出画面边缘 */
-    private val maxOffset = 0.06f
+    /** 相机偏移的宽松上限（真正的安全 clamp 在渲染器里按画布边距计算） */
+    private val maxOffset = 0.30f
 
     /** 死区：忽略约 0.5° 以下的微抖动 */
     private val deadZone = 0.009f
@@ -100,7 +101,7 @@ class GyroCamera(context: Context) : SensorEventListener {
 
         targetX = (applyDeadZone(wy) * sensitivity).coerceIn(-maxOffset, maxOffset)
         targetY = (applyDeadZone(wx) * sensitivity).coerceIn(-maxOffset, maxOffset)
-        targetRoll = (applyDeadZone(wz) * sensitivity * 0.6f).coerceIn(-0.05f, 0.05f)
+        targetRoll = (applyDeadZone(wz) * sensitivity * 0.6f).coerceIn(-0.08f, 0.08f)
     }
 
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
@@ -113,7 +114,7 @@ class GyroCamera(context: Context) : SensorEventListener {
         vRoll += ((targetRoll - roll) * stiffness - damping * vRoll) * d
         x = (x + vx * d).coerceIn(-maxOffset, maxOffset)
         y = (y + vy * d).coerceIn(-maxOffset, maxOffset)
-        roll = (roll + vRoll * d).coerceIn(-0.05f, 0.05f)
+        roll = (roll + vRoll * d).coerceIn(-0.08f, 0.08f)
     }
 
     private fun multiplyTranspose(a: FloatArray, b: FloatArray, out: FloatArray) {

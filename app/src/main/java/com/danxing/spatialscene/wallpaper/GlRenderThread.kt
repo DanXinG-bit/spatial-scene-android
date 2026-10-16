@@ -1,5 +1,7 @@
 package com.danxing.spatialscene.wallpaper
 
+import android.content.Context
+import android.graphics.BitmapFactory
 import android.opengl.EGL14
 import android.opengl.EGLConfig
 import android.opengl.EGLContext
@@ -9,16 +11,27 @@ import android.opengl.EGLSurface
 import android.opengl.GLES30
 import android.util.Log
 import android.view.SurfaceHolder
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
+import com.danxing.spatialscene.gl.GlCore
+import com.danxing.spatialscene.gl.PhotoProgram
+import com.danxing.spatialscene.gl.ProceduralProgram
+import com.danxing.spatialscene.scene.AppSettings
+import com.danxing.spatialscene.scene.Scene
+import com.danxing.spatialscene.scene.SceneStore
+import kotlin.math.abs
+import kotlin.math.max
+import kotlin.math.min
 
 /**
- * 独立的 EGL/GLES 渲染线程，直接渲染到 WallpaperService 的 Surface。
+ * 独立的 EGL/GLES 3.0 渲染线程，直接渲染到 WallpaperService 的 Surface。
  *
- * M0 渲染一张 160x160 的深度网格（约 5.1 万三角形），
- * 顶点着色器按程序化场景深度位移，相机由 [GyroCamera] 驱动。
+ * - 有活动场景时：照片纹理 + 深度图网格视差（[PhotoProgram]）
+ * - 没有场景时：M0 的程序化山谷兜底（[ProceduralProgram]）
+ *
+ * 省电策略：只在「可见 + 相机仍在运动（或场景/设置刚变化）」时绘制，
+ * 静止时跳过绘制，仅保持传感器监听。
  */
 class GlRenderThread(
+    private val context: Context,
     private val holder: SurfaceHolder,
     private val camera: GyroCamera
 ) : Thread("SpatialScene-Render") {
@@ -29,24 +42,41 @@ class GlRenderThread(
     @Volatile
     private var visible = false
 
+    @Volatile
+    private var needsDraw = true
+
     private var eglDisplay: EGLDisplay = EGL14.EGL_NO_DISPLAY
     private var eglContext: EGLContext = EGL14.EGL_NO_CONTEXT
     private var eglSurface: EGLSurface = EGL14.EGL_NO_SURFACE
 
-    private var program = 0
-    private var uZoom = -1
-    private var uCam = -1
-    private var uParallax = -1
-    private var uRoll = -1
+    private var grid: GlCore.Grid? = null
+    private var photoProgram: PhotoProgram? = null
+    private var proceduralProgram: ProceduralProgram? = null
 
-    private var vbo = 0
-    private var ibo = 0
-    private var indexCount = 0
+    private var imageTexture = 0
+    private var depthTexture = 0
+    private var scene: Scene? = null
+    private var loadedSceneId: String? = null
+
+    private var loadedVersion = -1L
+    private var parallax = 1f
+    private var depthGamma = 0.9f
+
     private var viewportWidth = 0
     private var viewportHeight = 0
 
+    private var lastCamX = Float.NaN
+    private var lastCamY = Float.NaN
+    private var lastCamRoll = Float.NaN
+
     fun setVisible(value: Boolean) {
         visible = value
+        needsDraw = true
+        if (value) camera.reset()
+    }
+
+    fun requestRedraw() {
+        needsDraw = true
     }
 
     fun shutdown() {
@@ -67,14 +97,25 @@ class GlRenderThread(
 
                 if (visible && holder.surface?.isValid == true) {
                     updateViewport()
+                    refreshIfNeeded()
                     camera.step(dt)
-                    draw()
-                    if (!EGL14.eglSwapBuffers(eglDisplay, eglSurface)) {
-                        Log.w(TAG, "eglSwapBuffers failed: ${EGL14.eglGetError()}")
-                        sleep(50)
+
+                    val moved = cameraMoved()
+                    if (needsDraw || moved) {
+                        draw()
+                        if (!EGL14.eglSwapBuffers(eglDisplay, eglSurface)) {
+                            Log.w(TAG, "eglSwapBuffers 失败: ${EGL14.eglGetError()}")
+                            sleep(50)
+                        }
+                        lastCamX = camera.cameraX
+                        lastCamY = camera.cameraY
+                        lastCamRoll = camera.cameraRoll
+                        needsDraw = false
+                        sleep(5)
+                    } else {
+                        // 静止：不绘制，省电
+                        sleep(16)
                     }
-                    // 约 60fps 上限，避免无谓耗电
-                    sleep(5)
                 } else {
                     sleep(32)
                 }
@@ -176,83 +217,76 @@ class GlRenderThread(
     // ------------------------------------------------------------------- GL
 
     private fun initGl(): Boolean {
-        val vs = compileShader(GLES30.GL_VERTEX_SHADER, SceneShaders.VERTEX)
-        val fs = compileShader(GLES30.GL_FRAGMENT_SHADER, SceneShaders.FRAGMENT)
-        if (vs == 0 || fs == 0) return false
-
-        program = GLES30.glCreateProgram()
-        GLES30.glAttachShader(program, vs)
-        GLES30.glAttachShader(program, fs)
-        GLES30.glLinkProgram(program)
-
-        val linked = IntArray(1)
-        GLES30.glGetProgramiv(program, GLES30.GL_LINK_STATUS, linked, 0)
-        if (linked[0] == 0) {
-            Log.e(TAG, "着色器链接失败: ${GLES30.glGetProgramInfoLog(program)}")
-            return false
+        return try {
+            photoProgram = PhotoProgram()
+            proceduralProgram = ProceduralProgram()
+            grid = GlCore.createGrid(SEGMENTS)
+            true
+        } catch (t: Throwable) {
+            Log.e(TAG, "GL 初始化失败", t)
+            false
         }
-        GLES30.glDeleteShader(vs)
-        GLES30.glDeleteShader(fs)
-
-        uZoom = GLES30.glGetUniformLocation(program, "uZoom")
-        uCam = GLES30.glGetUniformLocation(program, "uCam")
-        uParallax = GLES30.glGetUniformLocation(program, "uParallax")
-        uRoll = GLES30.glGetUniformLocation(program, "uRoll")
-
-        buildGrid(160)
-        return true
     }
 
-    private fun buildGrid(segments: Int) {
-        val n = segments
-        val vertexCount = (n + 1) * (n + 1)
+    private fun refreshIfNeeded() {
+        if (loadedVersion == SceneStore.version) return
+        loadedVersion = SceneStore.version
 
-        val vertices = ByteBuffer
-            .allocateDirect(vertexCount * 2 * 4)
-            .order(ByteOrder.nativeOrder())
-            .asFloatBuffer()
-        for (j in 0..n) {
-            for (i in 0..n) {
-                vertices.put(i.toFloat() / n * 2f - 1f)
-                vertices.put(j.toFloat() / n * 2f - 1f)
-            }
+        val settings = AppSettings.get(context)
+        parallax = settings.parallax
+        depthGamma = settings.depthGamma
+        camera.sensitivity = BASE_SENSITIVITY * settings.sensitivity
+
+        val active = SceneStore.get(context).activeScene()
+        if (active?.id != loadedSceneId) {
+            loadScene(active)
+            loadedSceneId = active?.id
+        } else if (active != null) {
+            scene = active
         }
-        vertices.position(0)
+        needsDraw = true
+    }
 
-        val indices = ByteBuffer
-            .allocateDirect(n * n * 6 * 4)
-            .order(ByteOrder.nativeOrder())
-            .asIntBuffer()
-        for (j in 0 until n) {
-            for (i in 0 until n) {
-                val a = j * (n + 1) + i
-                val b = a + 1
-                val c = a + (n + 1)
-                val d = c + 1
-                indices.put(a).put(c).put(b)
-                indices.put(b).put(c).put(d)
+    private fun loadScene(target: Scene?) {
+        releaseTextures()
+        scene = target
+        if (target == null) return
+        try {
+            val image = BitmapFactory.decodeFile(target.imagePath)
+            val depth = BitmapFactory.decodeFile(target.depthPath)
+            if (image == null || depth == null) {
+                Log.e(TAG, "场景图片加载失败: ${target.id}")
+                scene = null
+                return
             }
+            imageTexture = GlCore.loadTexture(image, mipmaps = true)
+            depthTexture = GlCore.loadTexture(depth, mipmaps = false)
+            image.recycle()
+            depth.recycle()
+            Log.i(TAG, "场景已加载: ${target.name} (${target.imageWidth}x${target.imageHeight})")
+        } catch (t: Throwable) {
+            Log.e(TAG, "加载场景失败", t)
+            releaseTextures()
+            scene = null
         }
-        indices.position(0)
-        indexCount = n * n * 6
+    }
 
-        val buffers = IntArray(2)
-        GLES30.glGenBuffers(2, buffers, 0)
-        vbo = buffers[0]
-        ibo = buffers[1]
+    private fun releaseTextures() {
+        if (imageTexture != 0) {
+            GlCore.deleteTexture(imageTexture)
+            imageTexture = 0
+        }
+        if (depthTexture != 0) {
+            GlCore.deleteTexture(depthTexture)
+            depthTexture = 0
+        }
+    }
 
-        GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, vbo)
-        GLES30.glBufferData(
-            GLES30.GL_ARRAY_BUFFER, vertexCount * 2 * 4, vertices,
-            GLES30.GL_STATIC_DRAW
-        )
-        GLES30.glBindBuffer(GLES30.GL_ELEMENT_ARRAY_BUFFER, ibo)
-        GLES30.glBufferData(
-            GLES30.GL_ELEMENT_ARRAY_BUFFER, indexCount * 4, indices,
-            GLES30.GL_STATIC_DRAW
-        )
-        GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, 0)
-        GLES30.glBindBuffer(GLES30.GL_ELEMENT_ARRAY_BUFFER, 0)
+    private fun cameraMoved(): Boolean {
+        if (lastCamX.isNaN()) return true
+        return abs(camera.cameraX - lastCamX) > MOTION_EPSILON ||
+            abs(camera.cameraY - lastCamY) > MOTION_EPSILON ||
+            abs(camera.cameraRoll - lastCamRoll) > MOTION_EPSILON
     }
 
     private fun draw() {
@@ -260,35 +294,58 @@ class GlRenderThread(
         GLES30.glClearColor(0.02f, 0.02f, 0.05f, 1f)
         GLES30.glClear(GLES30.GL_COLOR_BUFFER_BIT)
 
-        GLES30.glUseProgram(program)
-        // 1.10 的放大相当于四周各留 5% 安全边，配合相机 clamp 杜绝露边
-        GLES30.glUniform1f(uZoom, 1.10f)
-        GLES30.glUniform2f(uCam, camera.cameraX, camera.cameraY)
-        GLES30.glUniform1f(uParallax, 1.0f)
-        GLES30.glUniform1f(uRoll, camera.cameraRoll)
+        val mesh = grid ?: return
+        val current = scene
+        if (current == null || imageTexture == 0 || depthTexture == 0) {
+            proceduralProgram?.draw(mesh, camera.cameraX, camera.cameraY, camera.cameraRoll)
+            return
+        }
 
-        GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, vbo)
-        GLES30.glEnableVertexAttribArray(0)
-        GLES30.glVertexAttribPointer(0, 2, GLES30.GL_FLOAT, false, 8, 0)
-        GLES30.glBindBuffer(GLES30.GL_ELEMENT_ARRAY_BUFFER, ibo)
-        GLES30.glDrawElements(
-            GLES30.GL_TRIANGLES, indexCount, GLES30.GL_UNSIGNED_INT, 0
+        // cover 填充 + 用户缩放
+        val screenAspect = viewportWidth.toFloat() / max(viewportHeight, 1).toFloat()
+        val imageAspect = current.imageAspect
+        var scaleX = 1f
+        var scaleY = 1f
+        if (imageAspect >= screenAspect) {
+            scaleX = imageAspect / screenAspect
+        } else {
+            scaleY = screenAspect / imageAspect
+        }
+        scaleX *= current.zoom
+        scaleY *= current.zoom
+
+        // 防露边：位移不超过四周安全边距（位移 = |cam| * d * parallax，d <= 1）
+        val margin = min(
+            scaleX - 1f - abs(current.offsetX),
+            scaleY - 1f - abs(current.offsetY)
         )
-        GLES30.glDisableVertexAttribArray(0)
-        GLES30.glBindBuffer(GLES30.GL_ARRAY_BUFFER, 0)
-        GLES30.glBindBuffer(GLES30.GL_ELEMENT_ARRAY_BUFFER, 0)
+        val maxCam = (margin * 0.9f / max(parallax, 0.05f)).coerceAtLeast(0f)
+        val camX = camera.cameraX.coerceIn(-maxCam, maxCam)
+        val camY = camera.cameraY.coerceIn(-maxCam, maxCam)
+
+        photoProgram?.draw(
+            mesh,
+            imageTexture,
+            depthTexture,
+            scaleX,
+            scaleY,
+            current.offsetX,
+            current.offsetY,
+            camX,
+            camY,
+            parallax,
+            depthGamma
+        )
     }
 
     private fun releaseGl() {
-        if (program != 0) {
-            GLES30.glDeleteProgram(program)
-            program = 0
-        }
-        if (vbo != 0 || ibo != 0) {
-            GLES30.glDeleteBuffers(2, intArrayOf(vbo, ibo), 0)
-            vbo = 0
-            ibo = 0
-        }
+        releaseTextures()
+        photoProgram?.release()
+        photoProgram = null
+        proceduralProgram?.release()
+        proceduralProgram = null
+        GlCore.deleteGrid(grid)
+        grid = null
     }
 
     private fun updateViewport() {
@@ -298,25 +355,20 @@ class GlRenderThread(
         if (w != viewportWidth || h != viewportHeight) {
             viewportWidth = w
             viewportHeight = h
+            needsDraw = true
         }
-    }
-
-    private fun compileShader(type: Int, source: String): Int {
-        val shader = GLES30.glCreateShader(type)
-        if (shader == 0) return 0
-        GLES30.glShaderSource(shader, source)
-        GLES30.glCompileShader(shader)
-        val status = IntArray(1)
-        GLES30.glGetShaderiv(shader, GLES30.GL_COMPILE_STATUS, status, 0)
-        if (status[0] == 0) {
-            Log.e(TAG, "着色器编译失败: ${GLES30.glGetShaderInfoLog(shader)}")
-            GLES30.glDeleteShader(shader)
-            return 0
-        }
-        return shader
     }
 
     companion object {
         private const val TAG = "SpatialScene"
+
+        /** 网格细分（193x193 顶点，约 7.4 万三角形） */
+        private const val SEGMENTS = 192
+
+        /** 陀螺仪基础灵敏度（NDC/弧度），再乘以用户设置 */
+        private const val BASE_SENSITIVITY = 0.45f
+
+        /** 相机静止判定阈值 */
+        private const val MOTION_EPSILON = 2e-5f
     }
 }
