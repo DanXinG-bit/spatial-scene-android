@@ -32,12 +32,13 @@ class DepthEstimator(context: Context) {
     }
 
     private fun createSession(context: Context): OrtSession {
+        val modelBytes = context.assets.open(MODEL_ASSET).use { it.readBytes() }
         return try {
             val nnapiOptions = OrtSession.SessionOptions().apply {
                 setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
                 addNnapi()
             }
-            env.createSession(context.assets, MODEL_ASSET, nnapiOptions).also {
+            env.createSession(modelBytes, nnapiOptions).also {
                 Log.i(TAG, "使用 NNAPI 执行提供器")
             }
         } catch (t: Throwable) {
@@ -45,7 +46,7 @@ class DepthEstimator(context: Context) {
             val cpuOptions = OrtSession.SessionOptions().apply {
                 setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
             }
-            env.createSession(context.assets, MODEL_ASSET, cpuOptions)
+            env.createSession(modelBytes, cpuOptions)
         }
     }
 
