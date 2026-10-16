@@ -66,8 +66,8 @@ jobs:
           echo "using $APKSIGNER"
           "$APKSIGNER" verify --print-certs app/build/outputs/apk/debug/app-debug.apk | tee /tmp/certs.txt
           EXPECTED="44778f57b53a1a7a2f06b3eaef29936d8fe5e0292fd3be5cfc1c2bdb598c5f79"
-          FOUND="$(grep -i 'certificate SHA-256 digest' /tmp/certs.txt | head -1 | tr -d ' ' | cut -d: -f2-)"
-          if [ "$(echo "$FOUND" | tr 'A-F' 'a-f')" != "$EXPECTED" ]; then
+          FOUND="$(grep -i 'SHA-256 digest' /tmp/certs.txt | head -1 | sed 's/.*digest: *//' | tr -d ' \r' | tr 'A-F' 'a-f')"
+          if [ "$FOUND" != "$EXPECTED" ]; then
             echo "::error::APK 签名与稳定密钥不一致（覆盖升级会失败）：$FOUND"
             exit 1
           fi
