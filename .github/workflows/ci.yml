@@ -39,10 +39,15 @@ jobs:
         uses: actions/cache@v4
         with:
           path: app/src/main/assets/models
-          key: depth-model-da2s-int8-v1
+          key: depth-model-da2s-fp16-v2
 
       - name: Fetch depth model
         run: bash scripts/fetch_models.sh
+
+      - name: Validate depth model (CPU sanity check)
+        run: |
+          python3 -m pip install --quiet onnxruntime numpy
+          python3 scripts/validate_model.py app/src/main/assets/models/depth_anything_v2_small_fp16.onnx
 
       - name: Ensure Gradle wrapper
         run: |
