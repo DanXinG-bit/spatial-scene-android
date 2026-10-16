@@ -9,10 +9,14 @@
 ## 当前状态
 
 - [x] **M0 地基**：动态壁纸服务 + OpenGL ES 3.0 深度网格渲染 + 陀螺仪相机 + 云端 CI
-- [ ] **M1**：端侧深度模型（Depth Anything V2 Small）接入照片
-- [ ] **M2**：照片网格视差 + 遮挡区背景补全
+- [x] **M1**：端侧深度模型（Depth Anything V2 Small, int8）接入照片，可查看深度图与耗时
+- [ ] **M2**：照片网格视差 + 遮挡区背景补全 + 防露边
 - [ ] **M3**：编辑器 / 场景库 / 壁纸应用引导
 - [ ] **M4**：多层（LDI/MPI）高质量补全与手感调优
+
+## 下载体验
+
+- 最新构建（自动更新，debug 签名）：<https://github.com/DanXinG-bit/spatial-scene-android/releases/tag/latest>
 
 ## 构建
 
