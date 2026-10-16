@@ -3,6 +3,7 @@ package com.danxing.spatialscene.scene
 import android.content.Context
 import android.graphics.Bitmap
 import android.util.Log
+import com.danxing.spatialscene.depth.LayerDecomposer
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -39,7 +40,8 @@ class SceneStore private constructor(private val context: Context) {
         name: String,
         image: Bitmap,
         depth: Bitmap,
-        thumb: Bitmap
+        thumb: Bitmap,
+        layers: LayerDecomposer.Layers? = null
     ): Scene {
         val id = UUID.randomUUID().toString()
         val dir = File(root, id).apply { mkdirs() }
@@ -50,6 +52,30 @@ class SceneStore private constructor(private val context: Context) {
         imageFile.outputStream().use { image.compress(Bitmap.CompressFormat.JPEG, 92, it) }
         depthFile.outputStream().use { depth.compress(Bitmap.CompressFormat.PNG, 100, it) }
         thumbFile.outputStream().use { thumb.compress(Bitmap.CompressFormat.JPEG, 85, it) }
+
+        var bgImagePath = ""
+        var bgDepthPath = ""
+        var fgAlphaPath = ""
+        var fgDepth = 0f
+
+        if (layers != null) {
+            val bgImageFile = File(dir, "bg.jpg")
+            val bgDepthFile = File(dir, "bg_depth.png")
+            val fgAlphaFile = File(dir, "fg_alpha.png")
+            bgImageFile.outputStream().use {
+                layers.backgroundImage.compress(Bitmap.CompressFormat.JPEG, 92, it)
+            }
+            bgDepthFile.outputStream().use {
+                layers.backgroundDepth.compress(Bitmap.CompressFormat.PNG, 100, it)
+            }
+            fgAlphaFile.outputStream().use {
+                layers.foregroundAlpha.compress(Bitmap.CompressFormat.PNG, 100, it)
+            }
+            bgImagePath = bgImageFile.absolutePath
+            bgDepthPath = bgDepthFile.absolutePath
+            fgAlphaPath = fgAlphaFile.absolutePath
+            fgDepth = layers.foregroundDepth
+        }
 
         val scene = Scene(
             id = id,
@@ -62,7 +88,11 @@ class SceneStore private constructor(private val context: Context) {
             imageHeight = image.height,
             zoom = 1.12f,
             offsetX = 0f,
-            offsetY = 0f
+            offsetY = 0f,
+            bgImagePath = bgImagePath,
+            bgDepthPath = bgDepthPath,
+            fgAlphaPath = fgAlphaPath,
+            fgDepth = fgDepth
         )
         writeList(list() + scene)
         setActive(scene.id)

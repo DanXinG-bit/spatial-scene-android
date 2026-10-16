@@ -16,8 +16,17 @@ data class Scene(
     val imageHeight: Int,
     val zoom: Float,
     val offsetX: Float,
-    val offsetY: Float
+    val offsetY: Float,
+    // 分层场景（LDI）：前景主体 + 补全后的背景板
+    val bgImagePath: String = "",
+    val bgDepthPath: String = "",
+    val fgAlphaPath: String = "",
+    val fgDepth: Float = 0f
 ) {
+    /** 是否为分层（LDI）场景 */
+    val layered: Boolean
+        get() = bgImagePath.isNotEmpty() && fgAlphaPath.isNotEmpty()
+
     val imageAspect: Float
         get() = if (imageHeight == 0) 1f else imageWidth.toFloat() / imageHeight
 
@@ -36,6 +45,10 @@ data class Scene(
         put("zoom", zoom.toDouble())
         put("offsetX", offsetX.toDouble())
         put("offsetY", offsetY.toDouble())
+        put("bgImagePath", bgImagePath)
+        put("bgDepthPath", bgDepthPath)
+        put("fgAlphaPath", fgAlphaPath)
+        put("fgDepth", fgDepth.toDouble())
     }
 
     companion object {
@@ -51,7 +64,11 @@ data class Scene(
                 imageHeight = json.getInt("imageHeight"),
                 zoom = json.optDouble("zoom", 1.12).toFloat(),
                 offsetX = json.optDouble("offsetX", 0.0).toFloat(),
-                offsetY = json.optDouble("offsetY", 0.0).toFloat()
+                offsetY = json.optDouble("offsetY", 0.0).toFloat(),
+                bgImagePath = json.optString("bgImagePath", ""),
+                bgDepthPath = json.optString("bgDepthPath", ""),
+                fgAlphaPath = json.optString("fgAlphaPath", ""),
+                fgDepth = json.optDouble("fgDepth", 0.0).toFloat()
             )
         } catch (t: Throwable) {
             null

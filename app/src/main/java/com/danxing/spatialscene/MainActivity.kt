@@ -60,6 +60,7 @@ import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.unit.dp
 import com.danxing.spatialscene.depth.DepthEstimator
 import com.danxing.spatialscene.depth.DepthRefiner
+import com.danxing.spatialscene.depth.LayerDecomposer
 import com.danxing.spatialscene.scene.AppSettings
 import com.danxing.spatialscene.scene.Scene
 import com.danxing.spatialscene.scene.SceneStore
@@ -121,6 +122,7 @@ private fun PhotoTab() {
     var estimator by remember { mutableStateOf<DepthEstimator?>(null) }
     var original by remember { mutableStateOf<Bitmap?>(null) }
     var depthBitmap by remember { mutableStateOf<Bitmap?>(null) }
+    var layers by remember { mutableStateOf<LayerDecomposer.Layers?>(null) }
     var showDepth by remember { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }
     var status by remember { mutableStateOf<String?>(null) }
@@ -136,6 +138,7 @@ private fun PhotoTab() {
         busy = true
         error = null
         depthBitmap = null
+        layers = null
         runMs = null
         totalMs = null
         savedName = null
@@ -168,6 +171,14 @@ private fun PhotoTab() {
                     )
                 }
                 depthBitmap = refined.bitmap
+
+                status = "拆分图层（补全被遮住的背景）…"
+                layers = withContext(Dispatchers.Default) {
+                    LayerDecomposer.decompose(
+                        source, refined.values, refined.width, refined.height
+                    )
+                }
+
                 showDepth = true
                 status = null
             } catch (t: Throwable) {
@@ -308,7 +319,7 @@ private fun PhotoTab() {
                                 )
                             }
                             withContext(Dispatchers.IO) {
-                                store.save(name, image, depth, thumb)
+                                store.save(name, image, depth, thumb, layers)
                             }
                             savedName = name
                             status = null
@@ -338,6 +349,14 @@ private fun PhotoTab() {
                     verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
                     Text("已保存「$it」并设为当前场景。", style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        if (layers != null) {
+                            "已启用分层视差：主体为刚体，遮住的背景已由算法补全，倾斜时不会出现波浪纹。"
+                        } else {
+                            "这张图没有明显的前后景层次，已按单层视差保存（仍可正常使用）。"
+                        },
+                        style = MaterialTheme.typography.bodySmall
+                    )
                     Text(
                         "如果动态壁纸已经设置过，回到桌面/锁屏即可看到；否则先设置一次。",
                         style = MaterialTheme.typography.bodySmall

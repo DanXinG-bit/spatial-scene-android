@@ -55,6 +55,9 @@ class GlRenderThread(
 
     private var imageTexture = 0
     private var depthTexture = 0
+    private var bgImageTexture = 0
+    private var bgDepthTexture = 0
+    private var fgAlphaTexture = 0
     private var scene: Scene? = null
     private var loadedSceneId: String? = null
 
@@ -263,7 +266,28 @@ class GlRenderThread(
             depthTexture = GlCore.loadTexture(depth, mipmaps = false)
             image.recycle()
             depth.recycle()
-            Log.i(TAG, "场景已加载: ${target.name} (${target.imageWidth}x${target.imageHeight})")
+
+            if (target.layered) {
+                val bg = BitmapFactory.decodeFile(target.bgImagePath)
+                val bgDepth = BitmapFactory.decodeFile(target.bgDepthPath)
+                val fgAlpha = BitmapFactory.decodeFile(target.fgAlphaPath)
+                if (bg != null && bgDepth != null && fgAlpha != null) {
+                    bgImageTexture = GlCore.loadTexture(bg, mipmaps = true)
+                    bgDepthTexture = GlCore.loadTexture(bgDepth, mipmaps = false)
+                    fgAlphaTexture = GlCore.loadTexture(fgAlpha, mipmaps = false)
+                    bg.recycle()
+                    bgDepth.recycle()
+                    fgAlpha.recycle()
+                } else {
+                    Log.w(TAG, "分层贴图加载失败，回退单层渲染")
+                }
+            }
+
+            Log.i(
+                TAG,
+                "场景已加载: ${target.name} (${target.imageWidth}x${target.imageHeight}) " +
+                    "layered=${target.layered && bgImageTexture != 0}"
+            )
         } catch (t: Throwable) {
             Log.e(TAG, "加载场景失败", t)
             releaseTextures()
@@ -279,6 +303,18 @@ class GlRenderThread(
         if (depthTexture != 0) {
             GlCore.deleteTexture(depthTexture)
             depthTexture = 0
+        }
+        if (bgImageTexture != 0) {
+            GlCore.deleteTexture(bgImageTexture)
+            bgImageTexture = 0
+        }
+        if (bgDepthTexture != 0) {
+            GlCore.deleteTexture(bgDepthTexture)
+            bgDepthTexture = 0
+        }
+        if (fgAlphaTexture != 0) {
+            GlCore.deleteTexture(fgAlphaTexture)
+            fgAlphaTexture = 0
         }
     }
 
@@ -323,19 +359,30 @@ class GlRenderThread(
         val camX = camera.cameraX.coerceIn(-maxCam, maxCam)
         val camY = camera.cameraY.coerceIn(-maxCam, maxCam)
 
-        photoProgram?.draw(
-            mesh,
-            imageTexture,
-            depthTexture,
-            scaleX,
-            scaleY,
-            current.offsetX,
-            current.offsetY,
-            camX,
-            camY,
-            parallax,
-            depthGamma
-        )
+        if (current.layered && bgImageTexture != 0 && bgDepthTexture != 0 && fgAlphaTexture != 0) {
+            // 背景层：补全后的背景板 + 背景深度
+            photoProgram?.draw(
+                mesh, bgImageTexture, bgDepthTexture, 0,
+                scaleX, scaleY, current.offsetX, current.offsetY,
+                camX, camY, parallax, depthGamma
+            )
+            // 前景层：原照片 + 羽化 alpha + 常数深度（刚性平移，无波浪纹）
+            GLES30.glEnable(GLES30.GL_BLEND)
+            GLES30.glBlendFunc(GLES30.GL_SRC_ALPHA, GLES30.GL_ONE_MINUS_SRC_ALPHA)
+            photoProgram?.draw(
+                mesh, imageTexture, 0, fgAlphaTexture,
+                scaleX, scaleY, current.offsetX, current.offsetY,
+                camX, camY, parallax, depthGamma,
+                constantDepth = current.fgDepth, useAlpha = true
+            )
+            GLES30.glDisable(GLES30.GL_BLEND)
+        } else {
+            photoProgram?.draw(
+                mesh, imageTexture, depthTexture, 0,
+                scaleX, scaleY, current.offsetX, current.offsetY,
+                camX, camY, parallax, depthGamma
+            )
+        }
     }
 
     private fun releaseGl() {
