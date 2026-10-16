@@ -35,6 +35,15 @@ jobs:
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4
 
+      - name: Cache depth model
+        uses: actions/cache@v4
+        with:
+          path: app/src/main/assets/models
+          key: depth-model-da2s-int8-v1
+
+      - name: Fetch depth model
+        run: bash scripts/fetch_models.sh
+
       - name: Ensure Gradle wrapper
         run: |
           if [ ! -f gradlew ]; then

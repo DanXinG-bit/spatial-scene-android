@@ -11,3 +11,5 @@ captures/
 *.aab
 *.keystore
 *.jks
+app/src/main/assets/models/
+builds/
