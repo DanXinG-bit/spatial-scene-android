@@ -40,11 +40,16 @@
 app/                       # 应用与动态壁纸
   src/main/java/com/danxing/spatialscene/
     MainActivity.kt        # 首页（设置壁纸入口）
+    depth/                 # 端侧深度估计（ONNX Runtime）
     wallpaper/             # WallpaperService + GL 渲染 + 陀螺仪相机
     ui/theme/              # Material 3 主题
-docs/                      # 设计文档（放在研究目录）
+docs/                      # 工程文档
 .github/workflows/ci.yml   # 云端构建
 ```
+
+## 文档
+
+- [模型选择与踩坑记录](docs/model-notes.md)（为什么用 fp16、int8 的 ConvInteger 坑）
 
 ## 路线图
 
