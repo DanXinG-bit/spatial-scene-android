@@ -83,10 +83,13 @@ class PhotoProgram {
 
             void main() {
                 vec2 uv = aPos * 0.5 + 0.5;
-                float d = texture(uDepthTex, uv).r;
+                // Bitmap 第 0 行上传后在纹理 v=0（OpenGL 的底部），
+                // 所以采样时需要把 v 翻转，否则整幅图上下颠倒。
+                vec2 texUv = vec2(uv.x, 1.0 - uv.y);
+                float d = texture(uDepthTex, texUv).r;
                 d = pow(clamp(d, 0.0, 1.0), uGamma);
 
-                vUv = uv;
+                vUv = texUv;
 
                 vec2 p = aPos * uScale + uOffset;
                 p += uCam * d * uParallax;
