@@ -43,8 +43,8 @@ class GyroCamera(context: Context) : SensorEventListener {
 
     /** 静止判定：当前姿态与慢速跟随值的偏差 */
     private val motionThreshold = 0.035f
-    private val recenterDelay = 1.0f
-    private val recenterRate = 0.05f
+    private val recenterDelay = 0.45f
+    private val recenterRate = 0.28f
 
     @Volatile private var targetX = 0f
     @Volatile private var targetY = 0f
