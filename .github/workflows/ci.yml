@@ -59,6 +59,20 @@ jobs:
       - name: Build debug APK
         run: ./gradlew assembleDebug --stacktrace --no-daemon
 
+      - name: Verify APK signature (stable keystore)
+        run: |
+          SDK="${ANDROID_SDK_ROOT:-$ANDROID_HOME}"
+          APKSIGNER="$(find "$SDK/build-tools" -maxdepth 2 -name apksigner | sort | tail -1)"
+          echo "using $APKSIGNER"
+          "$APKSIGNER" verify --print-certs app/build/outputs/apk/debug/app-debug.apk | tee /tmp/certs.txt
+          EXPECTED="44778f57b53a1a7a2f06b3eaef29936d8fe5e0292fd3be5cfc1c2bdb598c5f79"
+          FOUND="$(grep -i 'certificate SHA-256 digest' /tmp/certs.txt | head -1 | tr -d ' ' | cut -d: -f2-)"
+          if [ "$(echo "$FOUND" | tr 'A-F' 'a-f')" != "$EXPECTED" ]; then
+            echo "::error::APK 签名与稳定密钥不一致（覆盖升级会失败）：$FOUND"
+            exit 1
+          fi
+          echo "签名校验通过"
+
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
