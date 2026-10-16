@@ -55,7 +55,9 @@ class GlRenderThread(
 
     private var imageTexture = 0
     private var depthTexture = 0
-    private var layerTextures = ArrayList<LayerTextures>()
+    private var bgImageTexture = 0
+    private var bgDepthTexture = 0
+    private var fgAlphaTexture = 0
     private var scene: Scene? = null
     private var loadedSceneId: String? = null
 
@@ -68,8 +70,6 @@ class GlRenderThread(
 
     private var lastCamX = Float.NaN
     private var lastCamY = Float.NaN
-
-    private class LayerTextures(val image: Int, val alpha: Int)
 
     fun setVisible(value: Boolean) {
         visible = value
@@ -265,27 +265,26 @@ class GlRenderThread(
             image.recycle()
             depth.recycle()
 
-            if (target.layered) {
-                for (layer in target.layers) {
-                    val layerImage = BitmapFactory.decodeFile(layer.imagePath)
-                    val layerAlpha = BitmapFactory.decodeFile(layer.alphaPath)
-                    if (layerImage == null || layerAlpha == null) {
-                        Log.w(TAG, "图层贴图加载失败，回退单层渲染")
-                        layerTextures.clear()
-                        break
-                    }
-                    val imageId = GlCore.loadTexture(layerImage, mipmaps = true)
-                    val alphaId = GlCore.loadTexture(layerAlpha, mipmaps = false)
-                    layerTextures.add(LayerTextures(imageId, alphaId))
-                    layerImage.recycle()
-                    layerAlpha.recycle()
+            if (target.softLayered) {
+                val bg = BitmapFactory.decodeFile(target.bgImagePath)
+                val bgDepth = BitmapFactory.decodeFile(target.bgDepthPath)
+                val fgAlpha = BitmapFactory.decodeFile(target.fgAlphaPath)
+                if (bg != null && bgDepth != null && fgAlpha != null) {
+                    bgImageTexture = GlCore.loadTexture(bg, mipmaps = true)
+                    bgDepthTexture = GlCore.loadTexture(bgDepth, mipmaps = false)
+                    fgAlphaTexture = GlCore.loadTexture(fgAlpha, mipmaps = false)
+                    bg.recycle()
+                    bgDepth.recycle()
+                    fgAlpha.recycle()
+                } else {
+                    Log.w(TAG, "软分层贴图加载失败，回退单层渲染")
                 }
             }
 
             Log.i(
                 TAG,
                 "场景已加载: ${target.name} (${target.imageWidth}x${target.imageHeight}) " +
-                    "layers=${layerTextures.size}"
+                    "softLayered=${target.softLayered && bgImageTexture != 0}"
             )
         } catch (t: Throwable) {
             Log.e(TAG, "加载场景失败", t)
@@ -303,11 +302,18 @@ class GlRenderThread(
             GlCore.deleteTexture(depthTexture)
             depthTexture = 0
         }
-        for (layer in layerTextures) {
-            GlCore.deleteTexture(layer.image)
-            GlCore.deleteTexture(layer.alpha)
+        if (bgImageTexture != 0) {
+            GlCore.deleteTexture(bgImageTexture)
+            bgImageTexture = 0
         }
-        layerTextures.clear()
+        if (bgDepthTexture != 0) {
+            GlCore.deleteTexture(bgDepthTexture)
+            bgDepthTexture = 0
+        }
+        if (fgAlphaTexture != 0) {
+            GlCore.deleteTexture(fgAlphaTexture)
+            fgAlphaTexture = 0
+        }
     }
 
     private fun cameraMoved(): Boolean {
@@ -350,21 +356,22 @@ class GlRenderThread(
         val camX = camera.cameraX.coerceIn(-clipX, clipX)
         val camY = (camera.cameraY * aspectWH).coerceIn(-clipY, clipY)
 
-        if (current.layered && layerTextures.size == current.layers.size) {
-            // 分层渲染：从最远层到最近层依次绘制（近层带羽化 alpha）
+        if (current.softLayered && bgImageTexture != 0 && bgDepthTexture != 0 && fgAlphaTexture != 0) {
+            // 背景板：补全后的图 + 连续深度（不透明）
+            photoProgram?.draw(
+                mesh, bgImageTexture, bgDepthTexture, 0,
+                scaleX, scaleY, current.offsetX, current.offsetY,
+                camX, camY, parallax, depthGamma
+            )
+            // 前景：原图 + 连续深度 + 软可见度 alpha（悬崖处透明，露出背景）
             GLES30.glEnable(GLES30.GL_BLEND)
             GLES30.glBlendFunc(GLES30.GL_SRC_ALPHA, GLES30.GL_ONE_MINUS_SRC_ALPHA)
-            val lastIndex = layerTextures.lastIndex
-            for (index in lastIndex downTo 0) {
-                val textures = layerTextures[index]
-                photoProgram?.draw(
-                    mesh, textures.image, 0, textures.alpha,
-                    scaleX, scaleY, current.offsetX, current.offsetY,
-                    camX, camY, parallax, depthGamma,
-                    constantDepth = current.layers[index].depth,
-                    useAlpha = index != lastIndex
-                )
-            }
+            photoProgram?.draw(
+                mesh, imageTexture, depthTexture, fgAlphaTexture,
+                scaleX, scaleY, current.offsetX, current.offsetY,
+                camX, camY, parallax, depthGamma,
+                useAlpha = true
+            )
             GLES30.glDisable(GLES30.GL_BLEND)
         } else {
             if (depthTexture == 0) return

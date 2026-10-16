@@ -3,7 +3,7 @@ package com.danxing.spatialscene.scene
 import android.content.Context
 import android.graphics.Bitmap
 import android.util.Log
-import com.danxing.spatialscene.depth.LayerDecomposer
+import com.danxing.spatialscene.depth.SoftLayerDecomposer
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.File
@@ -41,7 +41,7 @@ class SceneStore private constructor(private val context: Context) {
         image: Bitmap,
         depth: Bitmap,
         thumb: Bitmap,
-        layers: List<LayerDecomposer.Layer>? = null
+        soft: SoftLayerDecomposer.Result? = null
     ): Scene {
         val id = UUID.randomUUID().toString()
         val dir = File(root, id).apply { mkdirs() }
@@ -53,23 +53,25 @@ class SceneStore private constructor(private val context: Context) {
         depthFile.outputStream().use { depth.compress(Bitmap.CompressFormat.PNG, 100, it) }
         thumbFile.outputStream().use { thumb.compress(Bitmap.CompressFormat.JPEG, 85, it) }
 
-        val sceneLayers = ArrayList<SceneLayer>()
-        layers?.forEachIndexed { index, layer ->
-            val layerImage = File(dir, "layer_${index}.jpg")
-            val layerAlpha = File(dir, "layer_${index}_alpha.png")
-            layerImage.outputStream().use {
-                layer.image.compress(Bitmap.CompressFormat.JPEG, 92, it)
+        var bgImagePath = ""
+        var bgDepthPath = ""
+        var fgAlphaPath = ""
+        if (soft != null) {
+            val bgImageFile = File(dir, "bg.jpg")
+            val bgDepthFile = File(dir, "bg_depth.png")
+            val fgAlphaFile = File(dir, "fg_alpha.png")
+            bgImageFile.outputStream().use {
+                soft.backgroundImage.compress(Bitmap.CompressFormat.JPEG, 92, it)
             }
-            layerAlpha.outputStream().use {
-                layer.alpha.compress(Bitmap.CompressFormat.PNG, 100, it)
+            bgDepthFile.outputStream().use {
+                soft.backgroundDepth.compress(Bitmap.CompressFormat.PNG, 100, it)
             }
-            sceneLayers.add(
-                SceneLayer(
-                    imagePath = layerImage.absolutePath,
-                    alphaPath = layerAlpha.absolutePath,
-                    depth = layer.depth
-                )
-            )
+            fgAlphaFile.outputStream().use {
+                soft.foregroundAlpha.compress(Bitmap.CompressFormat.PNG, 100, it)
+            }
+            bgImagePath = bgImageFile.absolutePath
+            bgDepthPath = bgDepthFile.absolutePath
+            fgAlphaPath = fgAlphaFile.absolutePath
         }
 
         val scene = Scene(
@@ -84,7 +86,9 @@ class SceneStore private constructor(private val context: Context) {
             zoom = 1.12f,
             offsetX = 0f,
             offsetY = 0f,
-            layers = sceneLayers
+            bgImagePath = bgImagePath,
+            bgDepthPath = bgDepthPath,
+            fgAlphaPath = fgAlphaPath
         )
         writeList(list() + scene)
         setActive(scene.id)
