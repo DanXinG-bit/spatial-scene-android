@@ -4,6 +4,12 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
+/**
+ * 固定签名密钥：保证每次 CI 构建的 APK 签名一致，可以覆盖升级。
+ * （原先每次由 CI 重新生成 debug 签名 → 每个版本签名不同 → “签名冲突”。）
+ */
+val stableKeystore = rootProject.file("keystore/spatial-scene.p12")
+
 android {
     namespace = "com.danxing.spatialscene"
     compileSdk = 35
@@ -12,8 +18,8 @@ android {
         applicationId = "com.danxing.spatialscene"
         minSdk = 29
         targetSdk = 35
-        versionCode = 7
-        versionName = "0.4.0"
+        versionCode = 8
+        versionName = "0.5.0"
 
         ndk {
             // 现代 Android 设备均为 arm64；只保留 arm64 可显著减小 APK
@@ -21,8 +27,27 @@ android {
         }
     }
 
+    signingConfigs {
+        if (stableKeystore.exists()) {
+            create("stable") {
+                storeFile = stableKeystore
+                storePassword = "spatialscene"
+                keyAlias = "spatialscene"
+                keyPassword = "spatialscene"
+            }
+        }
+    }
+
     buildTypes {
+        debug {
+            if (stableKeystore.exists()) {
+                signingConfig = signingConfigs.getByName("stable")
+            }
+        }
         release {
+            if (stableKeystore.exists()) {
+                signingConfig = signingConfigs.getByName("stable")
+            }
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
