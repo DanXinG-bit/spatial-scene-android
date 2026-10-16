@@ -1,13 +1,16 @@
 #!/usr/bin/env bash
-# 下载端侧深度模型（Depth Anything V2 Small, int8）到 assets。
+# 下载端侧深度模型（Depth Anything V2 Small, fp16）到 assets。
 # 构建机/CI 使用；本机开发时也可手动执行。
+#
+# 注意：不要换用 int8/quantized 版本！其 ConvInteger 算子在 ONNX Runtime
+# 的 CPU/NNAPI 内核中没有实现（见 scripts/validate_model.py 的 CI 自检）。
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEST="$ROOT/app/src/main/assets/models"
-MODEL_NAME="depth_anything_v2_small_int8.onnx"
-MODEL_URL="${MODEL_URL:-https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/main/onnx/model_int8.onnx}"
-MODEL_SHA256="01aa7a23de3f4a0ee1a2bb9997e6918104c85a9f95dea46d27b9b3fb0c6b9001"
+MODEL_NAME="depth_anything_v2_small_fp16.onnx"
+MODEL_URL="${MODEL_URL:-https://huggingface.co/onnx-community/depth-anything-v2-small/resolve/main/onnx/model_fp16.onnx}"
+MODEL_SHA256="2df6223f206b5164e21f664ace61dabeb9bb6a49b8b5a3e00510b4807d0f5b04"
 
 mkdir -p "$DEST"
 

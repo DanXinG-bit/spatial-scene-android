@@ -33,20 +33,26 @@ class DepthEstimator(context: Context) {
 
     private fun createSession(context: Context): OrtSession {
         val modelBytes = context.assets.open(MODEL_ASSET).use { it.readBytes() }
-        return try {
-            val nnapiOptions = OrtSession.SessionOptions().apply {
-                setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
-                addNnapi()
+
+        if (TRY_NNAPI) {
+            try {
+                val nnapiOptions = OrtSession.SessionOptions().apply {
+                    setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
+                    addNnapi()
+                }
+                return env.createSession(modelBytes, nnapiOptions).also {
+                    Log.i(TAG, "使用 NNAPI 执行提供器")
+                }
+            } catch (t: Throwable) {
+                Log.w(TAG, "NNAPI 不可用，回退 CPU/XNNPACK", t)
             }
-            env.createSession(modelBytes, nnapiOptions).also {
-                Log.i(TAG, "使用 NNAPI 执行提供器")
-            }
-        } catch (t: Throwable) {
-            Log.w(TAG, "NNAPI 不可用，回退 CPU/XNNPACK", t)
-            val cpuOptions = OrtSession.SessionOptions().apply {
-                setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
-            }
-            env.createSession(modelBytes, cpuOptions)
+        }
+
+        val cpuOptions = OrtSession.SessionOptions().apply {
+            setOptimizationLevel(OrtSession.SessionOptions.OptLevel.ALL_OPT)
+        }
+        return env.createSession(modelBytes, cpuOptions).also {
+            Log.i(TAG, "使用 CPU/XNNPACK 执行提供器")
         }
     }
 
@@ -214,7 +220,13 @@ class DepthEstimator(context: Context) {
 
     companion object {
         private const val TAG = "SpatialScene"
-        private const val MODEL_ASSET = "models/depth_anything_v2_small_int8.onnx"
+        private const val MODEL_ASSET = "models/depth_anything_v2_small_fp16.onnx"
+
+        /**
+         * NNAPI 在部分机型上对 fp16 图支持不完整，先默认关闭；
+         * M2 做性能对比时再开。
+         */
+        private const val TRY_NNAPI = false
 
         /** 最长边目标值，需为 14 的倍数：518 = 37 * 14 */
         private const val TARGET_LONG_SIDE = 518
