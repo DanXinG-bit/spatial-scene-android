@@ -350,12 +350,10 @@ private fun PhotoTab() {
                 ) {
                     Text("已保存「$it」并设为当前场景。", style = MaterialTheme.typography.bodyMedium)
                     Text(
-                        if (soft != null) {
-                            if (soft.aiFilled) {
-                                "已启用 AI 软分层：主体背后被遮住的画面由 MI-GAN 生成，倾斜时逐步露出，不会出现拉伸或断层。"
-                            } else {
-                                "已启用软分层（AI 模型不可用，使用几何补全）：悬崖处会透明并露出补全内容。"
-                            }
+                        if (soft?.aiFilled == true) {
+                            "已启用 AI 软分层：主体背后被遮住的画面由 MI-GAN 生成，倾斜时逐步露出，不会出现拉伸或断层。"
+                        } else if (soft != null) {
+                            "已启用软分层（AI 模型不可用，使用几何补全）：悬崖处会透明并露出补全内容。"
                         } else {
                             "这张图深度变化不明显，已按单层视差保存（仍可正常使用）。"
                         },
