@@ -7,39 +7,43 @@ import kotlin.math.min
 import kotlin.math.roundToInt
 
 /**
- * 把「照片 + 深度」拆成两层：前景主体（刚体）+ 补全后的背景板。
+ * 把「照片 + 深度」拆成 N 层（默认 4 层），每层是一张刚性卡片：
  *
- * 目的：视差由两层刚性平移产生，而不是让一张连续网格在深度悬崖处
- * 被撑开（那会产生波浪纹）。被主体遮住的背景用多尺度 push-pull 金字塔
- * 从周围像素平滑延伸补全。
+ * - 每层内部深度为常数 → 网格不会在深度悬崖处被撑开 → 不再有波浪纹；
+ * - 每层被更近层遮住的区域，用**更远层**的像素做多尺度 push-pull 补全，
+ *   所以近层平移时露出的永远是合理的远处内容，而不是拉伸的橡皮膜。
+ *
+ * 层顺序：返回列表 index 0 = 最近层，依次到最后一层 = 最远层（渲染时先画最远）。
  */
 object LayerDecomposer {
 
     private const val TAG = "SpatialScene"
-
-    /** 前景（深度较高的像素）占比目标 */
-    private const val FOREGROUND_FRACTION = 0.38f
-
-    /** alpha 羽化半径（像素） */
+    private const val PACK_LONG_SIDE = 1024
     private const val FEATHER_RADIUS = 2
 
-    data class Layers(
-        val backgroundImage: Bitmap,
-        val backgroundDepth: Bitmap,
-        val foregroundAlpha: Bitmap,
-        /** 前景平面深度（0~1，近=1） */
-        val foregroundDepth: Float
+    /** 小于该占比的深度簇会被合并到邻居（避免碎层） */
+    private const val MIN_CLUSTER_FRACTION = 0.03f
+
+    /** 小于该占比的小碎块会被清除 */
+    private const val MIN_COMPONENT_FRACTION = 0.0015f
+
+    data class Layer(
+        val image: Bitmap,
+        val alpha: Bitmap,
+        /** 该层的平面深度（0~1，近=1） */
+        val depth: Float
     )
 
     fun decompose(
         image: Bitmap,
         depth: FloatArray,
         depthWidth: Int,
-        depthHeight: Int
-    ): Layers? {
+        depthHeight: Int,
+        layerCount: Int = 4
+    ): List<Layer>? {
         try {
             val longSide = max(image.width, image.height)
-            val scale = min(1f, 1024f / longSide)
+            val scale = min(1f, PACK_LONG_SIDE.toFloat() / longSide)
             val w = max((image.width * scale).roundToInt(), 8)
             val h = max((image.height * scale).roundToInt(), 8)
             val img = if (w != image.width || h != image.height) {
@@ -47,82 +51,102 @@ object LayerDecomposer {
             } else {
                 image
             }
-            val d = bilinear(depth, depthWidth, depthHeight, w, h)
             val n = w * h
+            val d = bilinear(depth, depthWidth, depthHeight, w, h)
 
-            // 1) 深度动态范围检查
             val sorted = d.copyOf()
             sorted.sort()
-            val minV = sorted[0]
-            val maxV = sorted[n - 1]
-            if (maxV - minV < 0.04f) {
+            if (sorted[n - 1] - sorted[0] < 0.04f) {
                 Log.i(TAG, "深度动态范围过小，回退单层渲染")
                 return null
             }
 
-            // 2) 阈值 = 深度最高的 FOREGROUND_FRACTION 分位
-            val thresholdIndex = ((n * (1f - FOREGROUND_FRACTION)).toInt()).coerceIn(0, n - 1)
-            val threshold = sorted[thresholdIndex]
+            val color = readColors(img, w, h)
 
-            var mask = ByteArray(n)
-            for (i in 0 until n) mask[i] = if (d[i] >= threshold) 1 else 0
-            mask = majorityFilter(mask, w, h)
-            mask = largestComponent(mask, w, h)
+            // 1) 深度聚类（label 越大越近），并合并过小的簇
+            var labels = kMeansLabels(d, layerCount)
+            labels = mergeSmallClusters(labels, d, layerCount, n)
+            val maxLabel = labels.maxOrNull() ?: 0
+            val actualCount = maxLabel + 1
 
-            var fgCount = 0
-            for (m in mask) if (m.toInt() == 1) fgCount++
-            if (fgCount < n / 40 || fgCount > n * 9 / 10) {
-                Log.i(TAG, "前景比例异常($fgCount/$n)，回退单层渲染")
+            // 2) 逐层生成（near → far）
+            val layers = ArrayList<Layer>(actualCount)
+            for (t in 0 until actualCount) {
+                val label = actualCount - 1 - t // t=0 最近层
+                var mask = ByteArray(n)
+                var count = 0
+                var depthSum = 0f
+                for (i in 0 until n) {
+                    if (labels[i] == label) {
+                        mask[i] = 1
+                        count++
+                        depthSum += d[i]
+                    }
+                }
+                if (count == 0) continue
+
+                mask = majorityFilter(mask, w, h)
+                mask = filterComponents(mask, w, h, (n * MIN_COMPONENT_FRACTION).toInt())
+
+                // 用自己的深度均值（平面深度）
+                var sum = 0f
+                var valid = 0
+                for (i in 0 until n) {
+                    if (mask[i].toInt() == 1) {
+                        sum += d[i]
+                        valid++
+                    }
+                }
+                if (valid == 0) continue
+                val layerDepth = (sum / valid).coerceIn(0.03f, 0.99f)
+
+                // 羽化 alpha
+                val alphaValues = FloatArray(n) { mask[it].toFloat() }
+                val feathered = boxBlur(alphaValues, w, h, FEATHER_RADIUS)
+
+                // 更远层作为补全来源；若没有更远层，则用自己的周边
+                val farther = FloatArray(n)
+                var fartherCount = 0
+                for (i in 0 until n) {
+                    if (labels[i] < label) {
+                        farther[i] = 1f
+                        fartherCount++
+                    }
+                }
+                val validSource = if (fartherCount > n / 400) farther else FloatArray(n) { mask[it].toFloat() }
+
+                val filled = pushPull(color, validSource, w, h)
+                // 自身区域保留原图，被遮区域用更远层的补全结果
+                val layerColor = filled
+                for (i in 0 until n) {
+                    if (mask[i].toInt() == 1) {
+                        layerColor[i * 3] = color[i * 3]
+                        layerColor[i * 3 + 1] = color[i * 3 + 1]
+                        layerColor[i * 3 + 2] = color[i * 3 + 2]
+                    }
+                }
+
+                val imagePixels = IntArray(n)
+                val alphaPixels = IntArray(n)
+                for (i in 0 until n) {
+                    imagePixels[i] = argb(layerColor[i * 3], layerColor[i * 3 + 1], layerColor[i * 3 + 2])
+                    val a = (feathered[i].coerceIn(0f, 1f) * 255f).roundToInt()
+                    alphaPixels[i] = gray(a)
+                }
+                val layerImage = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+                layerImage.setPixels(imagePixels, 0, w, 0, 0, w, h)
+                val layerAlpha = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+                layerAlpha.setPixels(alphaPixels, 0, w, 0, 0, w, h)
+
+                layers.add(Layer(layerImage, layerAlpha, layerDepth))
+                Log.i(TAG, "图层 $t: label=$label 像素=$valid 深度=$layerDepth")
+            }
+
+            if (layers.size < 2) {
+                Log.i(TAG, "有效图层不足，回退单层渲染")
                 return null
             }
-
-            // 3) 前景平面深度 = 前景区域深度均值
-            var depthSum = 0f
-            for (i in 0 until n) if (mask[i].toInt() == 1) depthSum += d[i]
-            val foregroundDepth = (depthSum / fgCount).coerceIn(0.05f, 0.98f)
-
-            // 4) alpha（0/1 → 羽化）
-            val alpha = FloatArray(n)
-            for (i in 0 until n) alpha[i] = mask[i].toFloat()
-            val feathered = boxBlur(alpha, w, h, FEATHER_RADIUS)
-
-            // 5) 读取图像像素
-            val pixels = IntArray(n)
-            img.getPixels(pixels, 0, w, 0, 0, w, h)
-            val color = FloatArray(n * 3)
-            for (i in 0 until n) {
-                val p = pixels[i]
-                color[i * 3] = ((p shr 16) and 0xFF) / 255f
-                color[i * 3 + 1] = ((p shr 8) and 0xFF) / 255f
-                color[i * 3 + 2] = (p and 0xFF) / 255f
-            }
-
-            // 6) 背景板：把前景区域挖掉后 push-pull 补全
-            val validBackground = FloatArray(n) { if (mask[it].toInt() == 1) 0f else 1f }
-            val bgColor = pushPull(color, validBackground, w, h)
-            val bgDepth = pushPull(FloatArray(n) { d[it] }, validBackground, w, h)
-
-            // 7) 生成位图
-            val bgPixels = IntArray(n)
-            val bgDepthPixels = IntArray(n)
-            val alphaPixels = IntArray(n)
-            for (i in 0 until n) {
-                bgPixels[i] = argb(bgColor[i * 3], bgColor[i * 3 + 1], bgColor[i * 3 + 2])
-                val dv = (bgDepth[i].coerceIn(0f, 1f) * 255f).roundToInt()
-                bgDepthPixels[i] = gray(dv)
-                val av = (feathered[i].coerceIn(0f, 1f) * 255f).roundToInt()
-                alphaPixels[i] = gray(av)
-            }
-
-            val bgImage = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-            bgImage.setPixels(bgPixels, 0, w, 0, 0, w, h)
-            val bgDepthBmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-            bgDepthBmp.setPixels(bgDepthPixels, 0, w, 0, 0, w, h)
-            val fgAlpha = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-            fgAlpha.setPixels(alphaPixels, 0, w, 0, 0, w, h)
-
-            Log.i(TAG, "分层完成: ${w}x$h, 前景 $fgCount px, 前景深度 $foregroundDepth")
-            return Layers(bgImage, bgDepthBmp, fgAlpha, foregroundDepth)
+            return layers
         } catch (t: Throwable) {
             Log.e(TAG, "分层失败，回退单层渲染", t)
             return null
@@ -130,6 +154,127 @@ object LayerDecomposer {
     }
 
     // ------------------------------------------------------------------ 工具
+
+    /** 1D k-means，返回每个像素的簇编号（0 = 最远，编号越大越近）。 */
+    private fun kMeansLabels(depth: FloatArray, k: Int): IntArray {
+        val n = depth.size
+        val step = max(1, n / 8192)
+        val samples = ArrayList<Float>(n / step + 1)
+        var i = 0
+        while (i < n) {
+            samples.add(depth[i])
+            i += step
+        }
+        if (samples.isEmpty()) return IntArray(n)
+
+        val sortedSamples = samples.sorted()
+        val centers = FloatArray(k) { idx ->
+            val q = ((idx + 0.5f) / k * (sortedSamples.size - 1)).toInt()
+            sortedSamples[q.coerceIn(0, sortedSamples.size - 1)]
+        }
+        // 保证中心互不相同
+        for (idx in 1 until k) {
+            if (centers[idx] <= centers[idx - 1]) centers[idx] = centers[idx - 1] + 1e-4f
+        }
+
+        val sums = FloatArray(k)
+        val counts = IntArray(k)
+        repeat(15) {
+            java.util.Arrays.fill(sums, 0f)
+            java.util.Arrays.fill(counts, 0)
+            for (s in samples) {
+                var best = 0
+                var bestDist = Float.MAX_VALUE
+                for (c in 0 until k) {
+                    val dist = kotlin.math.abs(s - centers[c])
+                    if (dist < bestDist) {
+                        bestDist = dist
+                        best = c
+                    }
+                }
+                sums[best] += s
+                counts[best]++
+            }
+            for (c in 0 until k) {
+                if (counts[c] > 0) centers[c] = sums[c] / counts[c]
+            }
+        }
+
+        // centers 已按初始化时的分位点递增；按中心重排，确保 0 = 最远
+        val order = (0 until k).sortedBy { centers[it] }
+        val remap = IntArray(k)
+        order.forEachIndexed { rank, original -> remap[original] = rank }
+
+        val labels = IntArray(n)
+        for (idx in 0 until n) {
+            var best = 0
+            var bestDist = Float.MAX_VALUE
+            for (c in 0 until k) {
+                val dist = kotlin.math.abs(depth[idx] - centers[c])
+                if (dist < bestDist) {
+                    bestDist = dist
+                    best = c
+                }
+            }
+            labels[idx] = remap[best]
+        }
+        return labels
+    }
+
+    /** 合并占比过小的簇到相邻簇。 */
+    private fun mergeSmallClusters(labels: IntArray, depth: FloatArray, k: Int, n: Int): IntArray {
+        val counts = IntArray(k)
+        for (l in labels) if (l in 0 until k) counts[l]++
+        val minCount = (n * MIN_CLUSTER_FRACTION).toInt()
+
+        // 计算每个簇的平均深度，用于决定并入哪一边
+        val sums = DoubleArray(k)
+        for (i in labels.indices) sums[labels[i]] += depth[i]
+        val means = DoubleArray(k) { if (counts[it] > 0) sums[it] / counts[it] else Double.NaN }
+
+        val parent = IntArray(k) { it }
+        fun find(x: Int): Int {
+            var v = x
+            while (parent[v] != v) v = parent[v]
+            return v
+        }
+
+        for (c in 0 until k) {
+            if (counts[c] >= minCount) continue
+            var target = -1
+            for (other in 0 until k) {
+                if (other == c || counts[other] < minCount) continue
+                if (target == -1 || kotlin.math.abs(means[other] - means[c]) < kotlin.math.abs(means[target] - means[c])) {
+                    target = other
+                }
+            }
+            if (target >= 0) parent[c] = target
+        }
+
+        // 压缩标签编号
+        val mapping = IntArray(k) { -1 }
+        var next = 0
+        val out = IntArray(labels.size)
+        for (i in labels.indices) {
+            val root = find(labels[i])
+            if (mapping[root] == -1) mapping[root] = next++
+            out[i] = mapping[root]
+        }
+        return out
+    }
+
+    private fun readColors(bitmap: Bitmap, w: Int, h: Int): FloatArray {
+        val pixels = IntArray(w * h)
+        bitmap.getPixels(pixels, 0, w, 0, 0, w, h)
+        val color = FloatArray(w * h * 3)
+        for (i in pixels.indices) {
+            val p = pixels[i]
+            color[i * 3] = ((p shr 16) and 0xFF) / 255f
+            color[i * 3 + 1] = ((p shr 8) and 0xFF) / 255f
+            color[i * 3 + 2] = (p and 0xFF) / 255f
+        }
+        return color
+    }
 
     private fun argb(r: Float, g: Float, b: Float): Int {
         val ri = (r.coerceIn(0f, 1f) * 255f).roundToInt()
@@ -173,7 +318,6 @@ object LayerDecomposer {
         return out
     }
 
-    /** 3x3 多数滤波：去掉孤立噪点。 */
     private fun majorityFilter(mask: ByteArray, w: Int, h: Int): ByteArray {
         val out = ByteArray(mask.size)
         for (y in 0 until h) {
@@ -196,82 +340,50 @@ object LayerDecomposer {
         return out
     }
 
-    /** 只保留最大的连通前景块（4 连通 BFS）。 */
-    private fun largestComponent(mask: ByteArray, w: Int, h: Int): ByteArray {
+    /** 清除面积过小的连通块。 */
+    private fun filterComponents(mask: ByteArray, w: Int, h: Int, minSize: Int): ByteArray {
+        if (minSize <= 1) return mask
         val visited = ByteArray(mask.size)
         val queue = IntArray(mask.size)
-        var bestStart = -1
-        var bestSize = 0
+        val out = mask.copyOf()
+        val component = ArrayList<Int>()
 
         for (start in mask.indices) {
             if (mask[start].toInt() == 0 || visited[start].toInt() == 1) continue
+            component.clear()
             var head = 0
             var tail = 0
             queue[tail++] = start
             visited[start] = 1
-            var size = 0
             while (head < tail) {
                 val index = queue[head++]
-                size++
+                component.add(index)
                 val x = index % w
                 val y = index / w
-                if (x > 0) enqueue(mask, visited, queue, tail, index - 1)?.let { tail = it }
-                if (x < w - 1) enqueue(mask, visited, queue, tail, index + 1)?.let { tail = it }
-                if (y > 0) enqueue(mask, visited, queue, tail, index - w)?.let { tail = it }
-                if (y < h - 1) enqueue(mask, visited, queue, tail, index + w)?.let { tail = it }
-            }
-            if (size > bestSize) {
-                bestSize = size
-                bestStart = start
-            }
-        }
-
-        if (bestStart < 0) return mask
-        if (bestSize == mask.count { it.toInt() == 1 }) return mask
-
-        // 重新标记最大块
-        val out = ByteArray(mask.size)
-        var head = 0
-        var tail = 0
-        queue[tail++] = bestStart
-        out[bestStart] = 1
-        val seen = ByteArray(mask.size)
-        seen[bestStart] = 1
-        while (head < tail) {
-            val index = queue[head++]
-            val x = index % w
-            val y = index / w
-            fun visit(nb: Int) {
-                if (mask[nb].toInt() == 1 && seen[nb].toInt() == 0) {
-                    seen[nb] = 1
-                    out[nb] = 1
-                    queue[tail++] = nb
+                if (x > 0 && mask[index - 1].toInt() == 1 && visited[index - 1].toInt() == 0) {
+                    visited[index - 1] = 1
+                    queue[tail++] = index - 1
+                }
+                if (x < w - 1 && mask[index + 1].toInt() == 1 && visited[index + 1].toInt() == 0) {
+                    visited[index + 1] = 1
+                    queue[tail++] = index + 1
+                }
+                if (y > 0 && mask[index - w].toInt() == 1 && visited[index - w].toInt() == 0) {
+                    visited[index - w] = 1
+                    queue[tail++] = index - w
+                }
+                if (y < h - 1 && mask[index + w].toInt() == 1 && visited[index + w].toInt() == 0) {
+                    visited[index + w] = 1
+                    queue[tail++] = index + w
                 }
             }
-            if (x > 0) visit(index - 1)
-            if (x < w - 1) visit(index + 1)
-            if (y > 0) visit(index - w)
-            if (y < h - 1) visit(index + w)
+            if (component.size < minSize) {
+                for (index in component) out[index] = 0
+            }
         }
         return out
     }
 
-    private inline fun enqueue(
-        mask: ByteArray,
-        visited: ByteArray,
-        queue: IntArray,
-        tail: Int,
-        index: Int
-    ): Int? {
-        if (mask[index].toInt() == 1 && visited[index].toInt() == 0) {
-            visited[index] = 1
-            queue[tail] = index
-            return tail + 1
-        }
-        return null
-    }
-
-    /** 均值滤波（积分图），边界按窗口内实际像素数归一。 */
     private fun boxBlur(src: FloatArray, w: Int, h: Int, radius: Int): FloatArray {
         val stride = w + 1
         val integral = DoubleArray(stride * (h + 1))
@@ -310,8 +422,8 @@ object LayerDecomposer {
     )
 
     /**
-     * 多尺度 push-pull 补全：valid=1 的像素是有效数据，其余为待补全的洞。
-     * 逐级降采样（带权重平均）到最粗，再从粗到细把洞用上层插值填上。
+     * 多尺度 push-pull 补全：valid=1 为有效像素，其余为洞。
+     * 逐级降采样（带权重平均）到最粗，再从粗到细回填。
      */
     private fun pushPull(color: FloatArray, valid: FloatArray, w: Int, h: Int): FloatArray {
         val levels = ArrayList<Level>()
@@ -363,7 +475,6 @@ object LayerDecomposer {
             ch = nh
         }
 
-        // 最粗一级用局部膨胀填满，保证后续插值源完整
         val coarsest = levels.last()
         if (coarsest.weight.all { it <= 0f }) return color
         dilateFill(coarsest)
@@ -390,7 +501,6 @@ object LayerDecomposer {
         return levels[0].color
     }
 
-    /** 用邻近有效像素把最粗一级的空缺填满（少量迭代即可，该层像素很少）。 */
     private fun dilateFill(level: Level) {
         var remaining = level.weight.count { it <= 0f }
         var guard = 0
