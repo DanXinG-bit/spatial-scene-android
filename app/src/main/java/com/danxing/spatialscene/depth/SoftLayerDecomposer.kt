@@ -2,6 +2,9 @@ package com.danxing.spatialscene.depth
 
 import android.content.Context
 import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Paint
+import android.graphics.Rect
 import android.util.Log
 import kotlin.math.max
 import kotlin.math.min
@@ -59,11 +62,14 @@ object SoftLayerDecomposer {
             val scale = min(1f, PACK_LONG_SIDE.toFloat() / longSide)
             val w = max((image.width * scale).roundToInt(), 8)
             val h = max((image.height * scale).roundToInt(), 8)
-            val img = if (w != image.width || h != image.height) {
-                Bitmap.createScaledBitmap(image, w, h, true)
-            } else {
-                image
-            }
+            // 始终画到一张确定尺寸的软件位图：避免 hardware/config/尺寸不一致导致的 getPixels 越界
+            val img = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+            Canvas(img).drawBitmap(
+                image,
+                Rect(0, 0, image.width, image.height),
+                Rect(0, 0, w, h),
+                Paint(Paint.FILTER_BITMAP_FLAG)
+            )
             val n = w * h
 
             val d = boxBlur(bilinear(depth, depthWidth, depthHeight, w, h), w, h, 1)
@@ -109,7 +115,7 @@ object SoftLayerDecomposer {
             // 4) 背景层：几何预填补（作为 AI 的输入）→ AI 补全
             stage = "bgFill"
             val validBg = FloatArray(n) { if (hole[it]) 0f else 1f }
-            val bgDepth = pushPull(FloatArray(n) { d[it] }, validBg, w, h)
+            val bgDepth = pushPullGray(d, validBg, w, h)
             var bgColor = pushPull(readColors(img, w, h), validBg, w, h)
 
             stage = "ai"
@@ -127,7 +133,7 @@ object SoftLayerDecomposer {
             stage = "fgDepth"
             // 5) 前景层几何深度：遮罩内 = 原始深度，遮罩外 = 边缘外延（无悬崖）
             val validFg = FloatArray(n) { if (hole[it]) 1f else 0f }
-            val fgDepth = pushPull(FloatArray(n) { d[it] }, validFg, w, h)
+            val fgDepth = pushPullGray(d, validFg, w, h)
 
             stage = "output"
             // 6) 输出
@@ -161,7 +167,10 @@ object SoftLayerDecomposer {
 
             return Result(bgImage, bgDepthBitmap, fgAlpha, fgDepthBitmap, aiFilled, note)
         } catch (t: Throwable) {
-            lastFailure = "$stage: ${t.javaClass.simpleName}: ${t.message}"
+            val frames = t.stackTrace.take(4).joinToString(" < ") {
+                "${it.fileName ?: "?"}:${it.lineNumber}"
+            }
+            lastFailure = "$stage: ${t.javaClass.simpleName}: ${t.message} @ $frames"
             Log.e(TAG, "软分层失败 @ $stage", t)
             return null
         }
@@ -277,8 +286,13 @@ object SoftLayerDecomposer {
     }
 
     private fun readColors(bitmap: Bitmap, w: Int, h: Int): FloatArray {
-        val pixels = IntArray(w * h)
-        bitmap.getPixels(pixels, 0, w, 0, 0, w, h)
+        val bw = bitmap.width
+        val bh = bitmap.height
+        if (bw != w || bh != h) {
+            throw IllegalStateException("位图尺寸 ${bw}x$bh 与目标 ${w}x$h 不一致")
+        }
+        val pixels = IntArray(bw * bh)
+        bitmap.getPixels(pixels, 0, bw, 0, 0, bw, bh)
         val color = FloatArray(w * h * 3)
         for (i in pixels.indices) {
             val p = pixels[i]
@@ -356,6 +370,25 @@ object SoftLayerDecomposer {
             }
         }
         return out
+    }
+
+    /**
+     * 单通道（深度）版本的 push-pull：打包成 RGB 三通道再解包。
+     * 注意 pushPull 内部按 `idx * 3` 寻址，直接传单通道数组会越界。
+     */
+    private fun pushPullGray(src: FloatArray, valid: FloatArray, w: Int, h: Int): FloatArray {
+        val n = w * h
+        val packed = FloatArray(n * 3)
+        for (i in 0 until n) {
+            val v = src[i]
+            packed[i * 3] = v
+            packed[i * 3 + 1] = v
+            packed[i * 3 + 2] = v
+        }
+        val filled = pushPull(packed, valid, w, h)
+        val gray = FloatArray(n)
+        for (i in 0 until n) gray[i] = filled[i * 3]
+        return gray
     }
 
     private class Level(
