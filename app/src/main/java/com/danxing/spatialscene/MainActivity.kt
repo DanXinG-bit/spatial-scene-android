@@ -348,14 +348,13 @@ private fun PhotoTab() {
                     modifier = Modifier.padding(12.dp),
                     verticalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
+                    val softNote = soft?.note
                     Text("已保存「$it」并设为当前场景。", style = MaterialTheme.typography.bodyMedium)
                     Text(
-                        if (soft?.aiFilled == true) {
-                            "已启用 AI 软分层：主体背后被遮住的画面由 MI-GAN 生成，倾斜时逐步露出，不会出现拉伸或断层。"
-                        } else if (soft != null) {
-                            "已启用软分层（AI 模型不可用，使用几何补全）：悬崖处会透明并露出补全内容。"
+                        if (softNote != null) {
+                            "已保存软分层：$softNote"
                         } else {
-                            "这张图深度变化不明显，已按单层视差保存（仍可正常使用）。"
+                            "分层失败，已按单层视差保存（仍可正常使用）。"
                         },
                         style = MaterialTheme.typography.bodySmall
                     )
@@ -434,7 +433,11 @@ private fun LibraryTab() {
         }
 
         Spacer(Modifier.height(4.dp))
-        WallpaperButtons(context)
+        Text(
+            text = "提示：切换场景后，若已设置过动态壁纸会立即生效；首次设置请点场景卡片上的「设为壁纸」。",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant
+        )
     }
 }
 
@@ -445,6 +448,7 @@ private fun SceneCard(
     onApply: () -> Unit,
     onDelete: () -> Unit
 ) {
+    val context = LocalContext.current
     val thumb = remember(scene.id) { BitmapFactory.decodeFile(scene.thumbPath) }
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -486,10 +490,10 @@ private fun SceneCard(
                         )
                     }
                     Text(
-                        text = if (scene.softLayered) {
-                            "软分层视差（无波浪纹）"
-                        } else {
-                            "单层视差（旧场景，建议重新生成）"
+                        text = when {
+                            scene.softLayered && scene.aiFilled -> "AI 软分层（主体 + 补全背景）"
+                            scene.softLayered -> "软分层（几何补全）"
+                            else -> "单层视差（旧场景，建议重新生成）"
                         },
                         style = MaterialTheme.typography.labelMedium,
                         color = if (scene.softLayered) {
@@ -500,9 +504,13 @@ private fun SceneCard(
                     )
                 }
             }
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
                 Button(onClick = onApply, enabled = !active) { Text("应用") }
                 OutlinedButton(onClick = onDelete) { Text("删除") }
+                TextButton(onClick = { setLiveWallpaper(context) }) { Text("设为壁纸") }
             }
         }
     }
@@ -614,7 +622,7 @@ private fun SettingsTab() {
 
         Spacer(Modifier.height(4.dp))
         Text(
-            text = "动态壁纸的设置入口在「场景库」页底部。",
+            text = "动态壁纸的设置按钮在「场景库」每个场景卡片上。",
             style = MaterialTheme.typography.bodySmall,
             color = MaterialTheme.colorScheme.onSurfaceVariant
         )
@@ -660,29 +668,14 @@ private fun SliderRow(
 
 // ------------------------------------------------------------------ 公共
 
-@Composable
-private fun WallpaperButtons(context: Context) {
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Button(
-            modifier = Modifier.fillMaxWidth(),
-            onClick = {
-                val intent = Intent(WallpaperManager.ACTION_CHANGE_LIVE_WALLPAPER)
-                    .putExtra(
-                        WallpaperManager.EXTRA_LIVE_WALLPAPER_COMPONENT,
-                        ComponentName(context, SpatialWallpaperService::class.java)
-                    )
-                context.startActivity(intent)
-            }
-        ) {
-            Text("设置为动态壁纸")
-        }
-        OpenWallpaperListButton(context)
-        Text(
-            text = "提示：系统选择器里建议选「主屏幕和锁屏」。",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
+/** 直接打开系统的动态壁纸设置（不需要再滚到页面底部）。 */
+private fun setLiveWallpaper(context: Context) {
+    val intent = Intent(WallpaperManager.ACTION_CHANGE_LIVE_WALLPAPER)
+        .putExtra(
+            WallpaperManager.EXTRA_LIVE_WALLPAPER_COMPONENT,
+            ComponentName(context, SpatialWallpaperService::class.java)
         )
-    }
+    context.startActivity(intent)
 }
 
 @Composable

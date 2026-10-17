@@ -22,7 +22,9 @@ data class Scene(
     val offsetY: Float,
     val bgImagePath: String = "",
     val bgDepthPath: String = "",
-    val fgAlphaPath: String = ""
+    val fgAlphaPath: String = "",
+    val fgDepthPath: String = "",
+    val aiFilled: Boolean = false
 ) {
     val softLayered: Boolean
         get() = bgImagePath.isNotEmpty() && bgDepthPath.isNotEmpty() && fgAlphaPath.isNotEmpty()
@@ -48,6 +50,8 @@ data class Scene(
         put("bgImagePath", bgImagePath)
         put("bgDepthPath", bgDepthPath)
         put("fgAlphaPath", fgAlphaPath)
+        put("fgDepthPath", fgDepthPath)
+        put("aiFilled", aiFilled)
     }
 
     companion object {
@@ -66,7 +70,9 @@ data class Scene(
                 offsetY = json.optDouble("offsetY", 0.0).toFloat(),
                 bgImagePath = json.optString("bgImagePath", ""),
                 bgDepthPath = json.optString("bgDepthPath", ""),
-                fgAlphaPath = json.optString("fgAlphaPath", "")
+                fgAlphaPath = json.optString("fgAlphaPath", ""),
+                fgDepthPath = json.optString("fgDepthPath", ""),
+                aiFilled = json.optBoolean("aiFilled", false)
             )
         } catch (t: Throwable) {
             null

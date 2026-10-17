@@ -58,6 +58,7 @@ class GlRenderThread(
     private var bgImageTexture = 0
     private var bgDepthTexture = 0
     private var fgAlphaTexture = 0
+    private var fgDepthTexture = 0
     private var scene: Scene? = null
     private var loadedSceneId: String? = null
 
@@ -276,6 +277,15 @@ class GlRenderThread(
                     bg.recycle()
                     bgDepth.recycle()
                     fgAlpha.recycle()
+                    val fgDepth = if (target.fgDepthPath.isNotEmpty()) {
+                        BitmapFactory.decodeFile(target.fgDepthPath)
+                    } else {
+                        null
+                    }
+                    if (fgDepth != null) {
+                        fgDepthTexture = GlCore.loadTexture(fgDepth, mipmaps = false)
+                        fgDepth.recycle()
+                    }
                 } else {
                     Log.w(TAG, "软分层贴图加载失败，回退单层渲染")
                 }
@@ -313,6 +323,10 @@ class GlRenderThread(
         if (fgAlphaTexture != 0) {
             GlCore.deleteTexture(fgAlphaTexture)
             fgAlphaTexture = 0
+        }
+        if (fgDepthTexture != 0) {
+            GlCore.deleteTexture(fgDepthTexture)
+            fgDepthTexture = 0
         }
     }
 
@@ -367,7 +381,9 @@ class GlRenderThread(
             GLES30.glEnable(GLES30.GL_BLEND)
             GLES30.glBlendFunc(GLES30.GL_SRC_ALPHA, GLES30.GL_ONE_MINUS_SRC_ALPHA)
             photoProgram?.draw(
-                mesh, imageTexture, depthTexture, fgAlphaTexture,
+                mesh, imageTexture,
+                if (fgDepthTexture != 0) fgDepthTexture else depthTexture,
+                fgAlphaTexture,
                 scaleX, scaleY, current.offsetX, current.offsetY,
                 camX, camY, parallax, depthGamma,
                 useAlpha = true

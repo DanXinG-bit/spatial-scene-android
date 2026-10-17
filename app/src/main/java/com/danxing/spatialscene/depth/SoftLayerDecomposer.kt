@@ -3,50 +3,40 @@ package com.danxing.spatialscene.depth
 import android.content.Context
 import android.graphics.Bitmap
 import android.util.Log
-import kotlin.math.exp
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
 
 /**
- * SLIDE 式软分层 + AI 去遮挡补全。
+ * 主体/背景两层软分层：**抠出主体 → AI 补全整块背景 → 把主体放回**。
  *
- * 1. 前景软可见度 `A = exp(-β·‖∇D‖²)`：平坦区域 A≈1，深度悬崖处 A≈0；
- * 2. 去遮挡区域（"主体背后可能露出来的地方"）= 悬崖带 ∩ 主体侧，用 AI（MI-GAN）补全；
- * 3. 渲染：先画背景板（连续深度），再叠加原图（连续深度）× A。
+ * 与之前"深度梯度透明带"方案的区别（也是修正的关键）：
+ * 1. 前景 alpha = **主体遮罩**（硬边 + 1px 羽化），不再在悬崖处透明 → 主体边缘不会被"吞掉"；
+ * 2. 背景板在**主体整个投影范围**内都被 AI 补全（不只是窄带）→ 主体平移让开时，
+ *    露出的是完整的、合理生成的内容（"另一面"），而不是拉伸的橡皮膜；
+ * 3. 两层都用**无悬崖深度**：前景层在遮罩外延用主体边缘深度，背景层在遮罩内用补全深度
+ *    → 两个网格内部都没有陡崖 → 不会产生拉伸条纹。
  *
- * 为什么是"主体侧"：相机平移时露出的是**主体背后**原本被挡住的像素，
- * 它们在图上的位置就是主体自己的那一片（不是主体外侧的背景）。
+ * 静止时：合成 = 原图（遮罩内是原图主体，遮罩外是原图背景），所以静态画质无损。
  */
 object SoftLayerDecomposer {
 
     private const val TAG = "SpatialScene"
     private const val PACK_LONG_SIDE = 1024
-
-    /** 可见度衰减系数：深度梯度越大越透明 */
-    private const val BETA = 45f
-
-    /** 低于该可见度视为悬崖带 */
-    private const val CLIFF_ALPHA = 0.18f
-
-    /** 透明带加宽半径（覆盖网格单元，避免跨悬崖三角形半透明拉伸） */
-    private const val ERODE_RADIUS = 2
-
-    /**
-     * 补全带宽半径。倾斜时露出的宽度 ≈ 视差 × 深度差，
-     * 在本工程参数下最大约 25px（1024 长边），取 24 并留余量。
-     */
-    private const val BAND_RADIUS = 24
-
-    /** 判定"主体侧"的深度余量 */
-    private const val FG_MARGIN = 0.10f
+    private const val FEATHER_RADIUS = 1
+    private const val DILATE_RADIUS = 2
+    private const val MIN_MASK_FRACTION = 0.03f
+    private const val MAX_MASK_FRACTION = 0.90f
 
     data class Result(
         val backgroundImage: Bitmap,
         val backgroundDepth: Bitmap,
         val foregroundAlpha: Bitmap,
-        /** 是否用到了 AI 补全（false = 几何补全兜底） */
-        val aiFilled: Boolean
+        /** 前景层几何深度（遮罩外延，无悬崖） */
+        val foregroundDepth: Bitmap,
+        val aiFilled: Boolean,
+        /** 诊断信息，直接显示在界面上 */
+        val note: String
     )
 
     fun decompose(
@@ -71,62 +61,70 @@ object SoftLayerDecomposer {
             val d = boxBlur(bilinear(depth, depthWidth, depthHeight, w, h), w, h, 1)
             val minV = d.minOrNull() ?: 0f
             val maxV = d.maxOrNull() ?: 1f
-            if (maxV - minV < 0.04f) {
-                Log.i(TAG, "深度动态范围过小，回退单层渲染")
-                return null
-            }
+            val depthRange = maxV - minV
 
-            // 1) 前景软可见度（并加宽透明带）
-            val visibility = FloatArray(n)
-            for (y in 0 until h) {
-                for (x in 0 until w) {
-                    val gx = sobelX(d, w, h, x, y)
-                    val gy = sobelY(d, w, h, x, y)
-                    visibility[y * w + x] = exp(-BETA * (gx * gx + gy * gy))
+            // 1) 主体遮罩：Otsu 自适应二值化 + 去碎块
+            var mask = if (depthRange < 0.04f) {
+                BooleanArray(n)
+            } else {
+                val t = otsuThreshold(d)
+                BooleanArray(n) { d[it] > t }
+            }
+            mask = largestComponents(mask, w, h, (n * 0.002f).toInt())
+
+            var maskCount = mask.count { it }
+            var note: String
+            if (maskCount < (n * MIN_MASK_FRACTION).toInt() ||
+                maskCount > (n * MAX_MASK_FRACTION).toInt()
+            ) {
+                // 退化：按深度取前 30% 作为主体
+                val sorted = d.copyOf()
+                sorted.sort()
+                val cut = sorted[(n * 0.70f).toInt().coerceIn(0, n - 1)]
+                val fallback = BooleanArray(n) { d[it] > cut }
+                val count = fallback.count { it }
+                if (count > (n * 0.01f).toInt()) {
+                    mask = largestComponents(fallback, w, h, (n * 0.002f).toInt())
+                    maskCount = mask.count { it }
                 }
             }
-            val alpha = filter(visibility, w, h, ERODE_RADIUS, min = true)
 
-            // 2) 去遮挡区域 = 悬崖带（膨胀）∩ 主体侧（比邻域最远内容更近）
-            val cliff = FloatArray(n) { if (alpha[it] < CLIFF_ALPHA) 1f else 0f }
-            val band = filter(cliff, w, h, BAND_RADIUS, min = false)
-            val localMinDepth = filter(d, w, h, BAND_RADIUS * 2, min = true)
-            val hole = BooleanArray(n)
-            var holeCount = 0
-            for (i in 0 until n) {
-                if (band[i] > 0.5f && d[i] > localMinDepth[i] + FG_MARGIN) {
-                    hole[i] = true
-                    holeCount++
-                }
-            }
-            if (holeCount < n / 200) {
-                Log.i(TAG, "去遮挡区域过小($holeCount/$n)，跳过补全")
-            }
+            val maskFloat = FloatArray(n) { if (mask[it]) 1f else 0f }
+            // 2) 前景 alpha：1px 羽化
+            val alpha = boxBlur(maskFloat, w, h, FEATHER_RADIUS)
+            // 3) 补全区域：遮罩外扩 2px（把边缘一起补，避免接缝）
+            val dilated = filter(maskFloat, w, h, DILATE_RADIUS, min = false)
+            val hole = BooleanArray(n) { dilated[it] > 0.5f }
 
-            // 3) 几何预填补（同时作为 AI 的输入与兜底）
-            val valid = FloatArray(n) { if (hole[it]) 0f else 1f }
-            val bgDepth = pushPull(FloatArray(n) { d[it] }, valid, w, h)
-            var bgColor = pushPull(readColors(img, w, h), valid, w, h)
+            // 4) 背景层：几何预填补（作为 AI 的输入）→ AI 补全
+            val validBg = FloatArray(n) { if (hole[it]) 0f else 1f }
+            val bgDepth = pushPull(FloatArray(n) { d[it] }, validBg, w, h)
+            var bgColor = pushPull(readColors(img, w, h), validBg, w, h)
 
-            // 4) AI 补全（输入用预填补后的图 → 上下文是背景状，抑制前景串色）
             var aiFilled = false
-            if (holeCount > 0) {
+            val aiStart = System.currentTimeMillis()
+            if (maskCount > 0) {
                 val filled = InpaintEstimator.inpaint(context, bgColor, hole, w, h)
                 if (filled != null) {
                     bgColor = filled
                     aiFilled = true
-                } else {
-                    Log.w(TAG, "AI 补全不可用，使用几何补全结果")
                 }
             }
+            val aiMs = System.currentTimeMillis() - aiStart
 
-            // 5) 输出位图
+            // 5) 前景层几何深度：遮罩内 = 原始深度，遮罩外 = 边缘外延（无悬崖）
+            val validFg = FloatArray(n) { if (hole[it]) 1f else 0f }
+            val fgDepth = pushPull(FloatArray(n) { d[it] }, validFg, w, h)
+
+            // 6) 输出
             val bgPixels = IntArray(n)
             val bgDepthPixels = IntArray(n)
+            val fgDepthPixels = IntArray(n)
             val alphaPixels = IntArray(n)
             for (i in 0 until n) {
                 bgPixels[i] = argb(bgColor[i * 3], bgColor[i * 3 + 1], bgColor[i * 3 + 2])
                 bgDepthPixels[i] = gray((bgDepth[i].coerceIn(0f, 1f) * 255f).roundToInt())
+                fgDepthPixels[i] = gray((fgDepth[i].coerceIn(0f, 1f) * 255f).roundToInt())
                 alphaPixels[i] = gray((alpha[i].coerceIn(0f, 1f) * 255f).roundToInt())
             }
 
@@ -134,39 +132,100 @@ object SoftLayerDecomposer {
             bgImage.setPixels(bgPixels, 0, w, 0, 0, w, h)
             val bgDepthBitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
             bgDepthBitmap.setPixels(bgDepthPixels, 0, w, 0, 0, w, h)
+            val fgDepthBitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+            fgDepthBitmap.setPixels(fgDepthPixels, 0, w, 0, 0, w, h)
             val fgAlpha = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
             fgAlpha.setPixels(alphaPixels, 0, w, 0, 0, w, h)
 
-            Log.i(
-                TAG,
-                "软分层完成: ${w}x$h, 补全 ${holeCount * 100 / n}%, " +
-                    "AI=${if (aiFilled) "yes" else "no"}"
-            )
-            return Result(bgImage, bgDepthBitmap, fgAlpha, aiFilled)
+            val coverage = maskCount * 100 / n
+            note = when {
+                depthRange < 0.04f -> "深度对比度不足（${(depthRange * 100).roundToInt()}%），按单层渲染"
+                aiFilled -> "主体 $coverage% · AI 补全 ${aiMs}ms"
+                else -> "主体 $coverage% · AI 不可用，已用几何补全"
+            }
+            Log.i(TAG, "软分层完成: ${w}x$h, $note")
+
+            return Result(bgImage, bgDepthBitmap, fgAlpha, fgDepthBitmap, aiFilled, note)
         } catch (t: Throwable) {
-            Log.e(TAG, "软分层失败，回退单层渲染", t)
+            Log.e(TAG, "软分层失败", t)
             return null
         }
     }
 
     // ------------------------------------------------------------------ 工具
 
-    private fun sobelX(d: FloatArray, w: Int, h: Int, x: Int, y: Int): Float {
-        val xm = (x - 1).coerceAtLeast(0)
-        val xp = (x + 1).coerceAtMost(w - 1)
-        val ym = (y - 1).coerceAtLeast(0)
-        val yp = (y + 1).coerceAtMost(h - 1)
-        return (d[ym * w + xp] + 2f * d[y * w + xp] + d[yp * w + xp]) -
-            (d[ym * w + xm] + 2f * d[y * w + xm] + d[yp * w + xm])
+    private fun otsuThreshold(values: FloatArray): Float {
+        val bins = 256
+        val minV = values.minOrNull() ?: 0f
+        val maxV = values.maxOrNull() ?: 1f
+        val range = (maxV - minV).coerceAtLeast(1e-6f)
+        val hist = IntArray(bins)
+        for (v in values) {
+            val b = (((v - minV) / range) * (bins - 1)).toInt().coerceIn(0, bins - 1)
+            hist[b]++
+        }
+        val total = values.size
+        var sum = 0.0
+        for (i in 0 until bins) sum += i.toDouble() * hist[i]
+        var sumB = 0.0
+        var weightB = 0
+        var best = -1.0
+        var bestBin = bins / 2
+        for (i in 0 until bins) {
+            weightB += hist[i]
+            if (weightB == 0) continue
+            val weightF = total - weightB
+            if (weightF == 0) break
+            sumB += i.toDouble() * hist[i]
+            val meanB = sumB / weightB
+            val meanF = (sum - sumB) / weightF
+            val between = weightB.toDouble() * weightF * (meanB - meanF) * (meanB - meanF)
+            if (between > best) {
+                best = between
+                bestBin = i
+            }
+        }
+        return minV + (bestBin + 0.5f) / bins * range
     }
 
-    private fun sobelY(d: FloatArray, w: Int, h: Int, x: Int, y: Int): Float {
-        val xm = (x - 1).coerceAtLeast(0)
-        val xp = (x + 1).coerceAtMost(w - 1)
-        val ym = (y - 1).coerceAtLeast(0)
-        val yp = (y + 1).coerceAtMost(h - 1)
-        return (d[yp * w + xm] + 2f * d[yp * w + x] + d[yp * w + xp]) -
-            (d[ym * w + xm] + 2f * d[ym * w + x] + d[ym * w + xp])
+    /** 只保留面积不小于 [minSize] 的连通块。 */
+    private fun largestComponents(mask: BooleanArray, w: Int, h: Int, minSize: Int): BooleanArray {
+        if (minSize <= 1) return mask
+        val visited = BooleanArray(mask.size)
+        val queue = IntArray(mask.size)
+        val out = mask.copyOf()
+        val component = ArrayList<Int>()
+
+        for (start in mask.indices) {
+            if (!mask[start] || visited[start]) continue
+            component.clear()
+            var head = 0
+            var tail = 0
+            queue[tail++] = start
+            visited[start] = true
+            while (head < tail) {
+                val idx = queue[head++]
+                component.add(idx)
+                val x = idx % w
+                val y = idx / w
+                if (x > 0 && mask[idx - 1] && !visited[idx - 1]) {
+                    visited[idx - 1] = true; queue[tail++] = idx - 1
+                }
+                if (x < w - 1 && mask[idx + 1] && !visited[idx + 1]) {
+                    visited[idx + 1] = true; queue[tail++] = idx + 1
+                }
+                if (y > 0 && mask[idx - w] && !visited[idx - w]) {
+                    visited[idx - w] = true; queue[tail++] = idx - w
+                }
+                if (y < h - 1 && mask[idx + w] && !visited[idx + w]) {
+                    visited[idx + w] = true; queue[tail++] = idx + w
+                }
+            }
+            if (component.size < minSize) {
+                for (idx in component) out[idx] = false
+            }
+        }
+        return out
     }
 
     /** 可分离的 min/max 滤波（方形窗口）。 */
@@ -245,12 +304,8 @@ object SoftLayerDecomposer {
                 val x0 = fx.toInt().coerceIn(0, srcWidth - 1)
                 val x1 = (x0 + 1).coerceIn(0, srcWidth - 1)
                 val wx = fx - x0
-                val v00 = src[y0 * srcWidth + x0]
-                val v01 = src[y0 * srcWidth + x1]
-                val v10 = src[y1 * srcWidth + x0]
-                val v11 = src[y1 * srcWidth + x1]
-                val top = v00 + (v01 - v00) * wx
-                val bottom = v10 + (v11 - v10) * wx
+                val top = src[y0 * srcWidth + x0] + (src[y0 * srcWidth + x1] - src[y0 * srcWidth + x0]) * wx
+                val bottom = src[y1 * srcWidth + x0] + (src[y1 * srcWidth + x1] - src[y1 * srcWidth + x0]) * wx
                 out[y * dstWidth + x] = top + (bottom - top) * wy
             }
         }
@@ -258,6 +313,7 @@ object SoftLayerDecomposer {
     }
 
     private fun boxBlur(src: FloatArray, w: Int, h: Int, radius: Int): FloatArray {
+        if (radius <= 0) return src.copyOf()
         val stride = w + 1
         val integral = DoubleArray(stride * (h + 1))
         for (y in 0 until h) {

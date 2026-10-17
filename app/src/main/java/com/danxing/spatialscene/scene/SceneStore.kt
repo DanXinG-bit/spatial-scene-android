@@ -56,10 +56,12 @@ class SceneStore private constructor(private val context: Context) {
         var bgImagePath = ""
         var bgDepthPath = ""
         var fgAlphaPath = ""
+        var fgDepthPath = ""
         if (soft != null) {
             val bgImageFile = File(dir, "bg.jpg")
             val bgDepthFile = File(dir, "bg_depth.png")
             val fgAlphaFile = File(dir, "fg_alpha.png")
+            val fgDepthFile = File(dir, "fg_depth.png")
             bgImageFile.outputStream().use {
                 soft.backgroundImage.compress(Bitmap.CompressFormat.JPEG, 92, it)
             }
@@ -69,9 +71,13 @@ class SceneStore private constructor(private val context: Context) {
             fgAlphaFile.outputStream().use {
                 soft.foregroundAlpha.compress(Bitmap.CompressFormat.PNG, 100, it)
             }
+            fgDepthFile.outputStream().use {
+                soft.foregroundDepth.compress(Bitmap.CompressFormat.PNG, 100, it)
+            }
             bgImagePath = bgImageFile.absolutePath
             bgDepthPath = bgDepthFile.absolutePath
             fgAlphaPath = fgAlphaFile.absolutePath
+            fgDepthPath = fgDepthFile.absolutePath
         }
 
         val scene = Scene(
@@ -88,7 +94,9 @@ class SceneStore private constructor(private val context: Context) {
             offsetY = 0f,
             bgImagePath = bgImagePath,
             bgDepthPath = bgDepthPath,
-            fgAlphaPath = fgAlphaPath
+            fgAlphaPath = fgAlphaPath,
+            fgDepthPath = fgDepthPath,
+            aiFilled = soft?.aiFilled == true
         )
         writeList(list() + scene)
         setActive(scene.id)
