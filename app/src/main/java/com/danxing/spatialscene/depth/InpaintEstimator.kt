@@ -31,7 +31,7 @@ object InpaintEstimator {
 
     private const val TAG = "SpatialScene"
     private const val ASSET = "models/migan_pipeline_v2.onnx"
-    private const val MAX_LONG_SIDE = 512
+    private const val MAX_LONG_SIDE = 1024
 
     private class Loaded(
         val env: OrtEnvironment,

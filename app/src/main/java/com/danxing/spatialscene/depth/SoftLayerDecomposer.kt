@@ -28,6 +28,11 @@ object SoftLayerDecomposer {
     private const val MIN_MASK_FRACTION = 0.03f
     private const val MAX_MASK_FRACTION = 0.90f
 
+    /** 最近一次失败的原因（直接显示在界面上，便于定位） */
+    @Volatile
+    var lastFailure: String? = null
+        private set
+
     data class Result(
         val backgroundImage: Bitmap,
         val backgroundDepth: Bitmap,
@@ -46,7 +51,10 @@ object SoftLayerDecomposer {
         depthWidth: Int,
         depthHeight: Int
     ): Result? {
+        var stage = "init"
         try {
+            lastFailure = null
+            stage = "scale"
             val longSide = max(image.width, image.height)
             val scale = min(1f, PACK_LONG_SIDE.toFloat() / longSide)
             val w = max((image.width * scale).roundToInt(), 8)
@@ -64,6 +72,7 @@ object SoftLayerDecomposer {
             val depthRange = maxV - minV
 
             // 1) 主体遮罩：Otsu 自适应二值化 + 去碎块
+            stage = "mask"
             var mask = if (depthRange < 0.04f) {
                 BooleanArray(n)
             } else {
@@ -89,6 +98,7 @@ object SoftLayerDecomposer {
                 }
             }
 
+            stage = "alpha"
             val maskFloat = FloatArray(n) { if (mask[it]) 1f else 0f }
             // 2) 前景 alpha：1px 羽化
             val alpha = boxBlur(maskFloat, w, h, FEATHER_RADIUS)
@@ -97,10 +107,12 @@ object SoftLayerDecomposer {
             val hole = BooleanArray(n) { dilated[it] > 0.5f }
 
             // 4) 背景层：几何预填补（作为 AI 的输入）→ AI 补全
+            stage = "bgFill"
             val validBg = FloatArray(n) { if (hole[it]) 0f else 1f }
             val bgDepth = pushPull(FloatArray(n) { d[it] }, validBg, w, h)
             var bgColor = pushPull(readColors(img, w, h), validBg, w, h)
 
+            stage = "ai"
             var aiFilled = false
             val aiStart = System.currentTimeMillis()
             if (maskCount > 0) {
@@ -112,10 +124,12 @@ object SoftLayerDecomposer {
             }
             val aiMs = System.currentTimeMillis() - aiStart
 
+            stage = "fgDepth"
             // 5) 前景层几何深度：遮罩内 = 原始深度，遮罩外 = 边缘外延（无悬崖）
             val validFg = FloatArray(n) { if (hole[it]) 1f else 0f }
             val fgDepth = pushPull(FloatArray(n) { d[it] }, validFg, w, h)
 
+            stage = "output"
             // 6) 输出
             val bgPixels = IntArray(n)
             val bgDepthPixels = IntArray(n)
@@ -147,7 +161,8 @@ object SoftLayerDecomposer {
 
             return Result(bgImage, bgDepthBitmap, fgAlpha, fgDepthBitmap, aiFilled, note)
         } catch (t: Throwable) {
-            Log.e(TAG, "软分层失败", t)
+            lastFailure = "$stage: ${t.javaClass.simpleName}: ${t.message}"
+            Log.e(TAG, "软分层失败 @ $stage", t)
             return null
         }
     }

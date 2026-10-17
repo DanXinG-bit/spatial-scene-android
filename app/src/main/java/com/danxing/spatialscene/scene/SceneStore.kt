@@ -89,7 +89,7 @@ class SceneStore private constructor(private val context: Context) {
             thumbPath = thumbFile.absolutePath,
             imageWidth = image.width,
             imageHeight = image.height,
-            zoom = 1.12f,
+            zoom = 1.25f,
             offsetX = 0f,
             offsetY = 0f,
             bgImagePath = bgImagePath,

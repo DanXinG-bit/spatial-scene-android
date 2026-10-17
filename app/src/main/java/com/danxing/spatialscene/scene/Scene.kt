@@ -65,7 +65,7 @@ data class Scene(
                 thumbPath = json.optString("thumbPath", ""),
                 imageWidth = json.getInt("imageWidth"),
                 imageHeight = json.getInt("imageHeight"),
-                zoom = json.optDouble("zoom", 1.12).toFloat(),
+                zoom = json.optDouble("zoom", 1.25).toFloat(),
                 offsetX = json.optDouble("offsetX", 0.0).toFloat(),
                 offsetY = json.optDouble("offsetY", 0.0).toFloat(),
                 bgImagePath = json.optString("bgImagePath", ""),

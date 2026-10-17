@@ -179,6 +179,9 @@ private fun PhotoTab() {
                     )
                 }
 
+                if (soft == null) {
+                    error = "分层失败：" + (SoftLayerDecomposer.lastFailure ?: "未知原因")
+                }
                 showDepth = true
                 status = null
             } catch (t: Throwable) {
@@ -354,7 +357,8 @@ private fun PhotoTab() {
                         if (softNote != null) {
                             "已保存软分层：$softNote"
                         } else {
-                            "分层失败，已按单层视差保存（仍可正常使用）。"
+                            "分层失败，已按单层视差保存。原因：" +
+                                (SoftLayerDecomposer.lastFailure ?: "未知")
                         },
                         style = MaterialTheme.typography.bodySmall
                     )

@@ -361,14 +361,20 @@ class GlRenderThread(
         scaleX *= current.zoom
         scaleY *= current.zoom
 
-        // 防露边：按轴 clamp；纵向按屏幕宽高比补偿，让横竖手感一致
-        val aspectWH = viewportWidth.toFloat() / max(viewportHeight, 1).toFloat()
+        // 防露边 + 手感一致：
+        // 1. 两个轴的"位移自由度"用**像素**统一（否则照片比例不同会导致某一轴更弱）；
+        // 2. 纵向 NDC 乘 W/H，使同样的倾角在横竖方向产生相同的**像素**位移。
+        val wPx = max(viewportWidth, 1).toFloat()
+        val hPx = max(viewportHeight, 1).toFloat()
         val marginX = (scaleX - 1f - abs(current.offsetX)).coerceAtLeast(0f)
         val marginY = (scaleY - 1f - abs(current.offsetY)).coerceAtLeast(0f)
-        val clipX = marginX * 0.9f / max(parallax, 0.05f)
-        val clipY = marginY * 0.9f / max(parallax, 0.05f)
+        val slackXpx = marginX * wPx * 0.5f
+        val slackYpx = marginY * hPx * 0.5f
+        val safePx = 0.9f * min(slackXpx, slackYpx) / max(parallax, 0.05f)
+        val clipX = safePx / (wPx * 0.5f)
+        val clipY = safePx / (hPx * 0.5f)
         val camX = camera.cameraX.coerceIn(-clipX, clipX)
-        val camY = (camera.cameraY * aspectWH).coerceIn(-clipY, clipY)
+        val camY = (camera.cameraY * (wPx / hPx)).coerceIn(-clipY, clipY)
 
         if (current.softLayered && bgImageTexture != 0 && bgDepthTexture != 0 && fgAlphaTexture != 0) {
             // 背景板：补全后的图 + 连续深度（不透明）
