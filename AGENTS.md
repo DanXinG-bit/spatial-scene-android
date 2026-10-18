@@ -88,6 +88,9 @@ camX = +k·n.x, camY = +k·n.y
 - MI-GAN：`image` uint8 [1,3,H,W] + `mask` uint8 [1,1,H,W]，**255=已知，0=待补**
 - ORT Java：`createTensor(env, ByteBuffer, shape)` 会把 uint8 当 int8 →
   **必须用 4 参重载 + `OnnxJavaType.UINT8`**
+- **MI-GAN 输出是 NCHW（平面）**：R 平面 / G 平面 / B 平面依次排列（已实测验证）。
+  按 RGB 交错读取会造成背景"灰白 + 横向错位 + 整块复制"。读输出前先用
+  `TensorInfo.shape` 判断 `shape[1]==3`(NCHW) 还是 `shape[3]==3`(NHWC)
 - `pushPull()` 内部按 `idx*3` 寻址（RGB 交错）。**单通道（深度）必须先 `pushPullGray()` 打包成 3 通道**，
   否则必崩 `ArrayIndexOutOfBoundsException: length=n; index=n+…`（v0.6~v0.9.0 一直踩这个坑）
 - `Bitmap.getPixels` 前确保位图是软件位图且尺寸与目标一致（`Canvas.drawBitmap` 画到新位图最稳）

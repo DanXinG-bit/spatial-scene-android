@@ -143,43 +143,74 @@ object InpaintEstimator {
                     val inputs = mapOf(loaded.imageName to imageTensor, loaded.maskName to maskTensor)
                     loaded.session.run(inputs).use { result ->
                         val output = result[0] as OnnxTensor
+                        val info = output.info as TensorInfo
+                        val dims = info.shape
                         val buffer = output.byteBuffer
-                        val pixels = mw * mh
-                        if (buffer.remaining() < pixels * 3) {
-                            Log.w(TAG, "补全输出尺寸异常: remaining=${buffer.remaining()}")
+
+                        // 模型输出是 NCHW（平面）：R 平面 / G 平面 / B 平面依次排列。
+                        // 曾按 RGB 交错读取 -> 每像素取到三个不同平面的字节，导致
+                        // 背景"灰白 + 横向错位 + 整块复制"。
+                        val planar = dims.size == 4 && dims[1] == 3L
+                        val oh = if (planar) dims[2].toInt() else dims[1].toInt()
+                        val ow = if (planar) dims[3].toInt() else dims[2].toInt()
+                        val pixels = ow * oh
+                        if (ow <= 0 || oh <= 0 || buffer.remaining() < pixels * 3) {
+                            Log.w(TAG, "补全输出尺寸异常: dims=${dims.toList()} rem=${buffer.remaining()}")
                             return null
                         }
-                        // 先取出模型分辨率的 RGB，再双线性放大回原尺寸
                         val small = FloatArray(pixels * 3)
-                        for (i in small.indices) {
-                            small[i] = (buffer.get().toInt() and 0xFF) / 255f
+                        if (planar) {
+                            for (c in 0..2) {
+                                for (i in 0 until pixels) {
+                                    small[i * 3 + c] = (buffer.get().toInt() and 0xFF) / 255f
+                                }
+                            }
+                        } else {
+                            for (i in small.indices) {
+                                small[i] = (buffer.get().toInt() and 0xFF) / 255f
+                            }
                         }
+
+                        // 双线性放大回原尺寸
                         val out = FloatArray(width * height * 3)
                         for (y in 0 until height) {
-                            val fy = (((y + 0.5f) * mh) / height) - 0.5f
-                            val y0 = fy.toInt().coerceIn(0, mh - 1)
-                            val y1 = (y0 + 1).coerceIn(0, mh - 1)
+                            val fy = (((y + 0.5f) * oh) / height) - 0.5f
+                            val y0 = fy.toInt().coerceIn(0, oh - 1)
+                            val y1 = (y0 + 1).coerceIn(0, oh - 1)
                             val wy = (fy - y0).coerceIn(0f, 1f)
                             for (x in 0 until width) {
-                                val fx = (((x + 0.5f) * mw) / width) - 0.5f
-                                val x0 = fx.toInt().coerceIn(0, mw - 1)
-                                val x1 = (x0 + 1).coerceIn(0, mw - 1)
+                                val fx = (((x + 0.5f) * ow) / width) - 0.5f
+                                val x0 = fx.toInt().coerceIn(0, ow - 1)
+                                val x1 = (x0 + 1).coerceIn(0, ow - 1)
                                 val wx = (fx - x0).coerceIn(0f, 1f)
                                 val dst = (y * width + x) * 3
                                 for (c in 0..2) {
-                                    val v00 = small[(y0 * mw + x0) * 3 + c]
-                                    val v01 = small[(y0 * mw + x1) * 3 + c]
-                                    val v10 = small[(y1 * mw + x0) * 3 + c]
-                                    val v11 = small[(y1 * mw + x1) * 3 + c]
+                                    val v00 = small[(y0 * ow + x0) * 3 + c]
+                                    val v01 = small[(y0 * ow + x1) * 3 + c]
+                                    val v10 = small[(y1 * ow + x0) * 3 + c]
+                                    val v11 = small[(y1 * ow + x1) * 3 + c]
                                     val top = v00 + (v01 - v00) * wx
                                     val bottom = v10 + (v11 - v10) * wx
                                     out[dst + c] = top + (bottom - top) * wy
                                 }
                             }
                         }
+
+                        // 已知区域强制还原为原图（保证背景/主体不被模型改动）
+                        for (y in 0 until height) {
+                            val row = y * width
+                            for (x in 0 until width) {
+                                val idx = row + x
+                                if (hole[idx]) continue
+                                val o = idx * 3
+                                out[o] = colors[o]
+                                out[o + 1] = colors[o + 1]
+                                out[o + 2] = colors[o + 2]
+                            }
+                        }
                         Log.i(
                             TAG,
-                            "AI 补全完成: ${mw}x$mh -> ${width}x$height, " +
+                            "AI 补全完成: ${ow}x$oh -> ${width}x$height, planar=$planar, " +
                                 "${System.currentTimeMillis() - started} ms"
                         )
                         out
