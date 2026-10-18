@@ -137,7 +137,7 @@ object SoftLayerDecomposer {
 
             // 5) 补全区常态柔化（只在脚印内；脚印外永远是原图，静态画面不受影响）
             stage = "soften"
-            val softened = boxBlur(fill, w, h, 2)
+            val softened = boxBlurRgb(fill, w, h, 2)
             val bgColor = fill.copyOf()
             for (i in 0 until n) {
                 val o = i * 3
@@ -404,6 +404,19 @@ object SoftLayerDecomposer {
                 val bottom = src[y1 * srcWidth + x0] + (src[y1 * srcWidth + x1] - src[y1 * srcWidth + x0]) * wx
                 out[y * dstWidth + x] = top + (bottom - top) * wy
             }
+        }
+        return out
+    }
+
+    /** 三通道（RGB 交错）模糊：boxBlur 只处理单通道，直接传 RGB 数组会越界。 */
+    private fun boxBlurRgb(src: FloatArray, w: Int, h: Int, radius: Int): FloatArray {
+        val n = w * h
+        val out = FloatArray(n * 3)
+        val plane = FloatArray(n)
+        for (c in 0..2) {
+            for (i in 0 until n) plane[i] = src[i * 3 + c]
+            val blurred = boxBlur(plane, w, h, radius)
+            for (i in 0 until n) out[i * 3 + c] = blurred[i]
         }
         return out
     }
