@@ -1,0 +1,13 @@
+空间场景模拟器输出
+
+1_composite.png  =  合成（静止）
+2_depth.png  =  深度图（亮=近）
+3_mask.png  =  主体遮罩（白=主体）
+4_background_ai.png  =  背景板 / AI 补全结果
+5_ai_hole.png  =  AI 实际收到的洞（白=待补）
+6_mask_overlay.png  =  遮罩叠加在原图上（红=主体）
+7_composite_tilted.png  =  合成（倾斜 cam=0.10）
+
+4_background_ai = 去掉主体后 AI 认为的背景
+5_ai_hole      = AI 实际收到的洞（白=待补）
+6_mask_overlay = 红色标出的主体范围

@@ -427,6 +427,24 @@ def main():
     titles = ['合成', '深度', '主体遮罩', '背景板/AI', '洞', '遮罩叠加']
     cv2.namedWindow('spatial-sim', cv2.WINDOW_NORMAL)
     cv2.resizeWindow('spatial-sim', 540, 960)
+
+    drag = {'on': False, 'x': 0, 'y': 0}
+
+    def on_mouse(event, x, y, flags, param):
+        nonlocal tx, ty
+        if event == cv2.EVENT_LBUTTONDOWN:
+            drag['on'] = True
+            drag['x'], drag['y'] = x, y
+        elif event == cv2.EVENT_LBUTTONUP:
+            drag['on'] = False
+        elif event == cv2.EVENT_MOUSEMOVE and drag['on']:
+            dx = (x - drag['x']) / 260.0
+            dy = (y - drag['y']) / 260.0
+            drag['x'], drag['y'] = x, y
+            tx = max(-0.30, min(0.30, tx + dx))
+            ty = max(-0.30, min(0.30, ty - dy))
+
+    cv2.setMouseCallback('spatial-sim', on_mouse)
     while True:
         comp, (sx, sy) = render(layers, cam_x, cam_y, args.zoom)
         img_show = to_bgr(comp)
@@ -444,6 +462,8 @@ def main():
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
         cv2.putText(img_show, f'cam=({cam_x:+.2f},{cam_y:+.2f}) target=({tx:+.2f},{ty:+.2f})',
                     (12, 56), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 1)
+        cv2.putText(img_show, 'drag mouse or WASD  |  R reset  |  1-6 views  |  ESC quit',
+                    (12, img_show.shape[0] - 16), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1)
         cv2.imshow('spatial-sim', img_show)
         k = cv2.waitKey(16) & 0xFF
         if k == 27:

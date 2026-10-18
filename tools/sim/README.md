@@ -16,6 +16,15 @@ bash scripts/fetch_models.sh
 pip install numpy onnxruntime opencv-python
 ```
 
+## 两个拖拽脚本（Windows，推荐）
+
+| 脚本 | 作用 |
+|---|---|
+| `把图片拖到这里.bat` | 把图拖上去 → 图片旁生成 `<图片名>_sim\` 与 7 张结果图，自动打开文件夹 |
+| `倾斜预览.bat` | 把图拖上去 → 打开交互窗口：**鼠标拖拽 / WASD 倾斜**，1~6 切换视图 |
+
+交互窗口里先**点一下窗口**让键盘焦点落在窗口上（否则 WASD 会被终端接收）。
+
 ## 用法
 
 ```bash
