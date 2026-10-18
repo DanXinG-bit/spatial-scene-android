@@ -13,3 +13,9 @@ captures/
 *.jks
 app/src/main/assets/models/
 builds/
+
+# 模拟器输出
+/tools/sim/out/
+sim_*.png
+01_composite*.png
+07_composite_tilt*.png
