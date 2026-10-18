@@ -123,7 +123,8 @@ private fun PhotoTab() {
     var original by remember { mutableStateOf<Bitmap?>(null) }
     var depthBitmap by remember { mutableStateOf<Bitmap?>(null) }
     var soft by remember { mutableStateOf<SoftLayerDecomposer.Result?>(null) }
-    var showDepth by remember { mutableStateOf(false) }
+    // 0=原图 1=深度 2=前景alpha 3=背景板(AI补全)
+    var previewMode by remember { mutableIntStateOf(0) }
     var busy by remember { mutableStateOf(false) }
     var status by remember { mutableStateOf<String?>(null) }
     var error by remember { mutableStateOf<String?>(null) }
@@ -139,6 +140,7 @@ private fun PhotoTab() {
         error = null
         depthBitmap = null
         soft = null
+        previewMode = 0
         runMs = null
         totalMs = null
         savedName = null
@@ -182,7 +184,6 @@ private fun PhotoTab() {
                 if (soft == null) {
                     error = "分层失败：" + (SoftLayerDecomposer.lastFailure ?: "未知原因")
                 }
-                showDepth = true
                 status = null
             } catch (t: Throwable) {
                 Log.e("SpatialScene", "深度估计失败", t)
@@ -258,7 +259,12 @@ private fun PhotoTab() {
             }
         }
 
-        val preview = if (showDepth) depthBitmap ?: original else original
+        val preview = when (previewMode) {
+            1 -> depthBitmap ?: original
+            2 -> soft?.foregroundAlpha ?: original
+            3 -> soft?.backgroundImage ?: original
+            else -> original
+        }
         if (preview != null) {
             Card(modifier = Modifier.fillMaxWidth()) {
                 Column(
@@ -274,14 +280,31 @@ private fun PhotoTab() {
                     if (depthBitmap != null) {
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             FilterChip(
-                                selected = !showDepth,
-                                onClick = { showDepth = false },
+                                selected = previewMode == 0,
+                                onClick = { previewMode = 0 },
                                 label = { Text("原图") }
                             )
                             FilterChip(
-                                selected = showDepth,
-                                onClick = { showDepth = true },
-                                label = { Text("深度图") }
+                                selected = previewMode == 1,
+                                onClick = { previewMode = 1 },
+                                label = { Text("深度") }
+                            )
+                            FilterChip(
+                                selected = previewMode == 2,
+                                onClick = { if (soft != null) previewMode = 2 },
+                                label = { Text("主体遮罩") }
+                            )
+                            FilterChip(
+                                selected = previewMode == 3,
+                                onClick = { if (soft != null) previewMode = 3 },
+                                label = { Text("背景板/AI") }
+                            )
+                        }
+                        if (soft == null) {
+                            Text(
+                                text = "（分层未生成，「主体遮罩 / 背景板」不可用）",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
                     }

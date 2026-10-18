@@ -20,6 +20,7 @@ import com.danxing.spatialscene.scene.SceneStore
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.tanh
 
 /**
  * 独立的 EGL/GLES 3.0 渲染线程，直接渲染到 WallpaperService 的 Surface。
@@ -370,15 +371,17 @@ class GlRenderThread(
         val marginY = (scaleY - 1f - abs(current.offsetY)).coerceAtLeast(0f)
         val slackXpx = marginX * wPx * 0.5f
         val slackYpx = marginY * hPx * 0.5f
-        // 绝对上限：屏幕宽度的 2.5%（2640px ≈ 66px）。
-        // 之前只按"可用边距"限制，横图配竖屏时边距巨大 → 位移可达 250px+，
-        // 整个画面会"游泳"，背景被深度梯度揉弯，边缘出现折射感。
-        val maxShiftPx = 0.025f * wPx / max(parallax, 0.05f)
-        val limitPx = min(0.9f * min(slackXpx, slackYpx), maxShiftPx)
-        val clipX = limitPx / (wPx * 0.5f)
-        val clipY = limitPx / (hPx * 0.5f)
-        val camX = camera.cameraX.coerceIn(-clipX, clipX)
-        val camY = (camera.cameraY * (wPx / hPx)).coerceIn(-clipY, clipY)
+        // 绝对上限：屏幕宽度的 3%（2640px ≈ 79px）。
+        // 关键：**软压缩**（tanh）而不是硬截断——否则倾角稍大就"撞墙"，
+        // 手感变成"不跟手"；tanh 让小角度保持线性、大角度逐渐趋近上限。
+        val par = max(parallax, 0.05f)
+        val limitPx = min(0.9f * min(slackXpx, slackYpx), 0.03f * wPx)
+        val rawShiftX = camera.cameraX * par * wPx * 0.5f
+        val rawShiftY = camera.cameraY * (wPx / hPx) * par * hPx * 0.5f
+        val shiftX = if (limitPx > 1f) limitPx * tanh(rawShiftX / limitPx) else 0f
+        val shiftY = if (limitPx > 1f) limitPx * tanh(rawShiftY / limitPx) else 0f
+        val camX = shiftX / (wPx * 0.5f) / par
+        val camY = shiftY / (hPx * 0.5f) / par
 
         if (current.softLayered && bgImageTexture != 0 && bgDepthTexture != 0 && fgAlphaTexture != 0) {
             // 背景板：补全后的图 + 连续深度（不透明）

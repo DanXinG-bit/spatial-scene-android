@@ -18,8 +18,8 @@ android {
         applicationId = "com.danxing.spatialscene"
         minSdk = 29
         targetSdk = 35
-        versionCode = 18
-        versionName = "0.9.6"
+        versionCode = 19
+        versionName = "0.9.7"
 
         ndk {
             // 现代 Android 设备均为 arm64；只保留 arm64 可显著减小 APK
