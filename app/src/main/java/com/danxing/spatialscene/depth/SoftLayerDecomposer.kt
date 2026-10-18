@@ -26,8 +26,6 @@ object SoftLayerDecomposer {
 
     private const val TAG = "SpatialScene"
     private const val PACK_LONG_SIDE = 1024
-    private const val FEATHER_RADIUS = 1
-    private const val DILATE_RADIUS = 2
     private const val MIN_MASK_FRACTION = 0.03f
     private const val MAX_MASK_FRACTION = 0.90f
 
@@ -62,7 +60,7 @@ object SoftLayerDecomposer {
             val scale = min(1f, PACK_LONG_SIDE.toFloat() / longSide)
             val w = max((image.width * scale).roundToInt(), 8)
             val h = max((image.height * scale).roundToInt(), 8)
-            // 始终画到一张确定尺寸的软件位图：避免 hardware/config/尺寸不一致导致的 getPixels 越界
+            // 始终画到确定尺寸的软件位图（避免 config/尺寸不一致导致 getPixels 越界）
             val img = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
             Canvas(img).drawBitmap(
                 image,
@@ -72,12 +70,11 @@ object SoftLayerDecomposer {
             )
             val n = w * h
 
+            stage = "depth"
             val d = boxBlur(bilinear(depth, depthWidth, depthHeight, w, h), w, h, 1)
-            val minV = d.minOrNull() ?: 0f
-            val maxV = d.maxOrNull() ?: 1f
-            val depthRange = maxV - minV
+            val depthRange = (d.maxOrNull() ?: 1f) - (d.minOrNull() ?: 0f)
 
-            // 1) 主体遮罩：Otsu 自适应二值化 + 去碎块
+            // 1) 主体遮罩
             stage = "mask"
             var mask = if (depthRange < 0.04f) {
                 BooleanArray(n)
@@ -86,57 +83,87 @@ object SoftLayerDecomposer {
                 BooleanArray(n) { d[it] > t }
             }
             mask = largestComponents(mask, w, h, (n * 0.002f).toInt())
-
             var maskCount = mask.count { it }
-            var note: String
             if (maskCount < (n * MIN_MASK_FRACTION).toInt() ||
                 maskCount > (n * MAX_MASK_FRACTION).toInt()
             ) {
-                // 退化：按深度取前 30% 作为主体
                 val sorted = d.copyOf()
                 sorted.sort()
                 val cut = sorted[(n * 0.70f).toInt().coerceIn(0, n - 1)]
                 val fallback = BooleanArray(n) { d[it] > cut }
-                val count = fallback.count { it }
-                if (count > (n * 0.01f).toInt()) {
+                if (fallback.count { it } > (n * 0.01f).toInt()) {
                     mask = largestComponents(fallback, w, h, (n * 0.002f).toInt())
                     maskCount = mask.count { it }
                 }
             }
-
-            stage = "alpha"
             val maskFloat = FloatArray(n) { if (mask[it]) 1f else 0f }
-            // 2) 前景 alpha：1px 羽化
-            val alpha = boxBlur(maskFloat, w, h, FEATHER_RADIUS)
-            // 3) 补全区域：遮罩外扩 2px（把边缘一起补，避免接缝）
-            val dilated = filter(maskFloat, w, h, DILATE_RADIUS, min = false)
-            val hole = BooleanArray(n) { dilated[it] > 0.5f }
 
-            // 4) 背景层：几何预填补（作为 AI 的输入）→ AI 补全
+            // 2) 环带：AI 只补"主体让开后会露出来"的那一圈。
+            //    细长主体（带宽 > 厚度）时 erode 为空 → 自动退化为整块补全。
+            stage = "band"
+            val bandPx = (0.06f * max(w, h)).roundToInt().coerceIn(24, 96)
+            val eroded = filter(maskFloat, w, h, bandPx, min = true)
+            var band = BooleanArray(n) { mask[it] && eroded[it] < 0.5f }
+            if (band.count { it } < (n * 0.002f).toInt()) {
+                band = mask.copyOf()
+            }
+            val bandCount = band.count { it }
+            val bandPercent = bandPx * 100 / max(w, h)
+
+            // 前景 alpha：**不羽化**。放大时的双线性采样自带 ~1px 抗锯齿；
+            // 羽化带会把两层不同位移的内容混合 → "液态玻璃"重影。
+            val alpha = maskFloat
+
+            // 3) 整块主体脚印做几何预填补：给模型"背景状"上下文，
+            //    避免它把主体纹理当成参考继续画下去
             stage = "bgFill"
-            val validBg = FloatArray(n) { if (hole[it]) 0f else 1f }
-            val bgDepth = pushPullGray(d, validBg, w, h)
-            var bgColor = pushPull(readColors(img, w, h), validBg, w, h)
+            val colors = readColors(img, w, h)
+            val footprint = filter(maskFloat, w, h, 2, min = false)
+            val validFoot = FloatArray(n) { if (footprint[it] > 0.5f) 0f else 1f }
+            var fill = pushPull(colors.copyOf(), validFoot, w, h)
 
+            // 4) AI 只补环带（洞小 → 内容更实）
             stage = "ai"
             var aiFilled = false
             val aiStart = System.currentTimeMillis()
-            if (maskCount > 0) {
-                val filled = InpaintEstimator.inpaint(context, bgColor, hole, w, h)
-                if (filled != null) {
-                    bgColor = filled
+            if (bandCount > 0) {
+                val ai = InpaintEstimator.inpaint(context, fill, band, w, h)
+                if (ai != null) {
+                    fill = ai
                     aiFilled = true
                 }
             }
             val aiMs = System.currentTimeMillis() - aiStart
 
-            stage = "fgDepth"
-            // 5) 前景层几何深度：遮罩内 = 原始深度，遮罩外 = 边缘外延（无悬崖）
-            val validFg = FloatArray(n) { if (hole[it]) 1f else 0f }
-            val fgDepth = pushPullGray(d, validFg, w, h)
+            // 5) 补全区常态柔化（只在脚印内；脚印外永远是原图，静态画面不受影响）
+            stage = "soften"
+            val softened = boxBlur(fill, w, h, 2)
+            val bgColor = fill.copyOf()
+            for (i in 0 until n) {
+                val o = i * 3
+                if (footprint[i] > 0.5f) {
+                    bgColor[o] = fill[o] * 0.35f + softened[o] * 0.65f
+                    bgColor[o + 1] = fill[o + 1] * 0.35f + softened[o + 1] * 0.65f
+                    bgColor[o + 2] = fill[o + 2] * 0.35f + softened[o + 2] * 0.65f
+                } else {
+                    bgColor[o] = colors[o]
+                    bgColor[o + 1] = colors[o + 1]
+                    bgColor[o + 2] = colors[o + 2]
+                }
+            }
 
+            // 6) 背景层深度：由外部向内的"最近值"平坦外延。
+            //    push-pull 会在脚印内形成碗形 → 背景被透镜式弯折、直线变弧。
+            stage = "bgDepth"
+            val validBg = FloatArray(n) { if (footprint[it] > 0.5f) 0f else 1f }
+            val bgDepth = nearestFill(d, validBg, w, h)
+
+            // 7) 前景层深度：遮罩内 = 原始深度，遮罩外 = 边缘外延（无悬崖）
+            stage = "fgDepth"
+            val fgDepth = nearestFill(d, maskFloat, w, h)
+
+            // 8) 输出
             stage = "output"
-            // 6) 输出
             val bgPixels = IntArray(n)
             val bgDepthPixels = IntArray(n)
             val fgDepthPixels = IntArray(n)
@@ -158,12 +185,12 @@ object SoftLayerDecomposer {
             fgAlpha.setPixels(alphaPixels, 0, w, 0, 0, w, h)
 
             val coverage = maskCount * 100 / n
-            note = when {
-                depthRange < 0.04f -> "深度对比度不足（${(depthRange * 100).roundToInt()}%），按单层渲染"
-                aiFilled -> "主体 $coverage% · AI 补全 ${aiMs}ms"
-                else -> "主体 $coverage% · AI 不可用，已用几何补全"
+            val note = when {
+                depthRange < 0.04f -> "\u6df1\u5ea6\u5bf9\u6bd4\u5ea6\u4e0d\u8db3\uff08${(depthRange * 100).roundToInt()}%\uff09\uff0c\u6309\u5355\u5c42\u6e32\u67d3"
+                aiFilled -> "\u4e3b\u4f53 $coverage% \u00b7 \u73af\u5e26 ${bandPx}px(${bandPercent}%) \u00b7 AI ${aiMs}ms"
+                else -> "\u4e3b\u4f53 $coverage% \u00b7 \u73af\u5e26 ${bandPx}px \u00b7 AI \u4e0d\u53ef\u7528\uff0c\u5df2\u7528\u51e0\u4f55\u8865\u5168"
             }
-            Log.i(TAG, "软分层完成: ${w}x$h, $note")
+            Log.i(TAG, "\u8f6f\u5206\u5c42\u5b8c\u6210: ${w}x$h, $note")
 
             return Result(bgImage, bgDepthBitmap, fgAlpha, fgDepthBitmap, aiFilled, note)
         } catch (t: Throwable) {
@@ -171,9 +198,49 @@ object SoftLayerDecomposer {
                 "${it.fileName ?: "?"}:${it.lineNumber}"
             }
             lastFailure = "$stage: ${t.javaClass.simpleName}: ${t.message} @ $frames"
-            Log.e(TAG, "软分层失败 @ $stage", t)
+            Log.e(TAG, "\u8f6f\u5206\u5c42\u5931\u8d25 @ $stage", t)
             return null
         }
+    }
+
+    /**
+     * 最近有效值填充：以有效像素为源做 BFS，洞内每个像素取"最近有效像素"的值。
+     * 相比 push-pull 更"硬"：洞内深度 = 周边背景深度（平坦外延），
+     * 不形成碗形梯度 → 背景不会被透镜式弯折。
+     */
+    private fun nearestFill(src: FloatArray, valid: FloatArray, w: Int, h: Int): FloatArray {
+        val n = w * h
+        val out = src.copyOf()
+        val visited = BooleanArray(n)
+        val queue = IntArray(n)
+        var head = 0
+        var tail = 0
+        for (i in 0 until n) {
+            if (valid[i] > 0.5f) {
+                visited[i] = true
+                queue[tail++] = i
+            }
+        }
+        if (tail == 0) return out
+        while (head < tail) {
+            val idx = queue[head++]
+            val x = idx % w
+            val y = idx / w
+            val v = out[idx]
+            if (x > 0 && !visited[idx - 1]) {
+                visited[idx - 1] = true; out[idx - 1] = v; queue[tail++] = idx - 1
+            }
+            if (x < w - 1 && !visited[idx + 1]) {
+                visited[idx + 1] = true; out[idx + 1] = v; queue[tail++] = idx + 1
+            }
+            if (y > 0 && !visited[idx - w]) {
+                visited[idx - w] = true; out[idx - w] = v; queue[tail++] = idx - w
+            }
+            if (y < h - 1 && !visited[idx + w]) {
+                visited[idx + w] = true; out[idx + w] = v; queue[tail++] = idx + w
+            }
+        }
+        return out
     }
 
     // ------------------------------------------------------------------ 工具

@@ -93,6 +93,12 @@ camX = +k·n.x, camY = +k·n.y
   `TensorInfo.shape` 判断 `shape[1]==3`(NCHW) 还是 `shape[3]==3`(NHWC)
 - `pushPull()` 内部按 `idx*3` 寻址（RGB 交错）。**单通道（深度）必须先 `pushPullGray()` 打包成 3 通道**，
   否则必崩 `ArrayIndexOutOfBoundsException: length=n; index=n+…`（v0.6~v0.9.0 一直踩这个坑）
+- 分层参数（v0.9.4 起）：
+  - 前景 alpha **不羽化**（羽化带会把两层不同位移混合 → "液态玻璃"重影）
+  - AI 只补**环带**：`band = mask ∧ ¬erode(mask, 6% 长边)`，细长主体自动退化为整块
+  - 背景层颜色：整块脚印先做 push-pull 预填补（给模型"背景状"上下文），AI 只补环带
+  - 背景/前景层**深度**用 `nearestFill`（由外向内最近值，平坦）而不是 push-pull
+    （碗形深度 = 透镜效应，背景直线会被弯）
 - `Bitmap.getPixels` 前确保位图是软件位图且尺寸与目标一致（`Canvas.drawBitmap` 画到新位图最稳）
 
 ## 7. 提交与验收
