@@ -6,6 +6,7 @@ import android.graphics.Canvas
 import android.graphics.Paint
 import android.graphics.Rect
 import android.util.Log
+import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.roundToInt
@@ -42,7 +43,13 @@ object SoftLayerDecomposer {
         val foregroundAlpha: Bitmap,
         /** 前景层几何深度（遮罩外延，无悬崖） */
         val foregroundDepth: Bitmap,
+        /** AI 实际收到的洞（白 = 待补），调试用 */
+        val holeMask: Bitmap,
+        /** 原图 + 红色半透明遮罩，调试用 */
+        val maskOverlay: Bitmap,
         val aiFilled: Boolean,
+        /** 洞内 AI 相对预填补的平均改动量（0~255），接近 0 说明 AI 没有真正补 */
+        val aiDelta: Float,
         /** 诊断信息，直接显示在界面上 */
         val note: String
     )
@@ -100,27 +107,28 @@ object SoftLayerDecomposer {
             }
             val maskFloat = FloatArray(n) { if (mask[it]) 1f else 0f }
 
-            // 2) 环带：AI 只补"主体让开后会露出来"的那一圈。
-            //    细长主体（带宽 > 厚度）时 erode 为空 → 自动退化为整块补全。
-            stage = "band"
-            val bandPx = (0.06f * max(w, h)).roundToInt().coerceIn(24, 96)
-            val eroded = filter(maskFloat, w, h, bandPx, min = true)
-            var band = BooleanArray(n) { mask[it] && eroded[it] < 0.5f }
-            if (band.count { it } < (n * 0.002f).toInt()) {
-                band = mask.copyOf()
-            }
-            val bandCount = band.count { it }
-            val bandPercent = bandPx * 100 / max(w, h)
+            // 2) 遮罩收尾：闭运算（桥接阴影造成的窄缺口）+ 洞填充
+            //    策略：宁可多包（主体上出现不动的洞，比背景跟着动更难接受）
+            stage = "maskClean"
+            val closeR = (0.02f * max(w, h)).roundToInt().coerceIn(4, 32)
+            var mf = filter(maskFloat, w, h, closeR, min = false)
+            mf = filter(mf, w, h, closeR, min = true)
+            val closedMask = BooleanArray(n) { mf[it] > 0.5f }
+            mask = fillEnclosedBackground(closedMask, w, h)
+            maskCount = mask.count { it }
+            val maskClean = FloatArray(n) { if (mask[it]) 1f else 0f }
 
             // 前景 alpha：**不羽化**。放大时的双线性采样自带 ~1px 抗锯齿；
             // 羽化带会把两层不同位移的内容混合 → "液态玻璃"重影。
-            val alpha = maskFloat
+            val alpha = maskClean
 
             // 3) 整块主体脚印做几何预填补：给模型"背景状"上下文，
             //    避免它把主体纹理当成参考继续画下去
             stage = "bgFill"
             val colors = readColors(img, w, h)
-            val footprint = filter(maskFloat, w, h, 2, min = false)
+            val footprint = filter(maskClean, w, h, 2, min = false)
+            val aiHole = BooleanArray(n) { footprint[it] > 0.5f }
+            val holeCount = aiHole.count { it }
             val validFoot = FloatArray(n) { if (footprint[it] > 0.5f) 0f else 1f }
             var fill = pushPull(colors.copyOf(), validFoot, w, h)
             // 注意：AI 看到的上下文必须是"真实背景"，所以洞 = 整个脚印。
@@ -130,10 +138,20 @@ object SoftLayerDecomposer {
             stage = "ai"
             var aiFilled = false
             val aiStart = System.currentTimeMillis()
-            if (bandCount > 0) {
-                val aiHole = BooleanArray(n) { footprint[it] > 0.5f }
+            var aiDelta = 0f
+            if (holeCount > 0) {
                 val ai = InpaintEstimator.inpaint(context, fill, aiHole, w, h)
                 if (ai != null) {
+                    var sum = 0.0
+                    var count = 0
+                    for (i in 0 until n) {
+                        if (!aiHole[i]) continue
+                        val o = i * 3
+                        sum += abs(ai[o] - fill[o]) + abs(ai[o + 1] - fill[o + 1]) +
+                            abs(ai[o + 2] - fill[o + 2])
+                        count += 3
+                    }
+                    aiDelta = if (count > 0) (sum / count * 255.0).toFloat() else 0f
                     fill = ai
                     aiFilled = true
                 }
@@ -192,15 +210,35 @@ object SoftLayerDecomposer {
             val fgAlpha = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
             fgAlpha.setPixels(alphaPixels, 0, w, 0, 0, w, h)
 
+            val holePixels = IntArray(n)
+            val overlayPixels = IntArray(n)
+            for (i in 0 until n) {
+                holePixels[i] = if (aiHole[i]) gray(255) else gray(0)
+                val o = i * 3
+                overlayPixels[i] = if (mask[i]) {
+                    argb(colors[o] * 0.5f + 0.5f, colors[o + 1] * 0.5f, colors[o + 2] * 0.5f)
+                } else {
+                    argb(colors[o], colors[o + 1], colors[o + 2])
+                }
+            }
+            val holeBitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+            holeBitmap.setPixels(holePixels, 0, w, 0, 0, w, h)
+            val overlayBitmap = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+            overlayBitmap.setPixels(overlayPixels, 0, w, 0, 0, w, h)
+
             val coverage = maskCount * 100 / n
+            val holePercent = holeCount * 100 / n
             val note = when {
                 depthRange < 0.04f -> "\u6df1\u5ea6\u5bf9\u6bd4\u5ea6\u4e0d\u8db3\uff08${(depthRange * 100).roundToInt()}%\uff09\uff0c\u6309\u5355\u5c42\u6e32\u67d3"
-                aiFilled -> "\u4e3b\u4f53 $coverage% \u00b7 \u73af\u5e26 ${bandPx}px(${bandPercent}%) \u00b7 AI ${aiMs}ms"
-                else -> "\u4e3b\u4f53 $coverage% \u00b7 \u73af\u5e26 ${bandPx}px \u00b7 AI \u4e0d\u53ef\u7528\uff0c\u5df2\u7528\u51e0\u4f55\u8865\u5168"
+                aiFilled -> "\u4e3b\u4f53 $coverage% \u00b7 \u6d1e $holePercent% \u00b7 AI \u6539\u52a8 ${aiDelta.roundToInt()} \u00b7 ${aiMs}ms"
+                else -> "\u4e3b\u4f53 $coverage% \u00b7 \u6d1e $holePercent% \u00b7 AI \u4e0d\u53ef\u7528\uff0c\u5df2\u7528\u51e0\u4f55\u8865\u5168"
             }
             Log.i(TAG, "\u8f6f\u5206\u5c42\u5b8c\u6210: ${w}x$h, $note")
 
-            return Result(bgImage, bgDepthBitmap, fgAlpha, fgDepthBitmap, aiFilled, note)
+            return Result(
+                bgImage, bgDepthBitmap, fgAlpha, fgDepthBitmap,
+                holeBitmap, overlayBitmap, aiFilled, aiDelta, note
+            )
         } catch (t: Throwable) {
             val frames = t.stackTrace.take(4).joinToString(" < ") {
                 "${it.fileName ?: "?"}:${it.lineNumber}"
@@ -209,6 +247,46 @@ object SoftLayerDecomposer {
             Log.e(TAG, "\u8f6f\u5206\u5c42\u5931\u8d25 @ $stage", t)
             return null
         }
+    }
+
+    /**
+     * 洞填充：把"不与画面边缘连通"的背景块并入主体。
+     * 针对深度模型在阴影区给出中间值、导致主体被切出缺口的问题。
+     */
+    private fun fillEnclosedBackground(mask: BooleanArray, w: Int, h: Int): BooleanArray {
+        val n = w * h
+        val reachable = BooleanArray(n)
+        val queue = IntArray(n)
+        var head = 0
+        var tail = 0
+        fun push(i: Int) {
+            if (!reachable[i] && !mask[i]) {
+                reachable[i] = true
+                queue[tail++] = i
+            }
+        }
+        for (x in 0 until w) {
+            push(x)
+            push((h - 1) * w + x)
+        }
+        for (y in 0 until h) {
+            push(y * w)
+            push(y * w + w - 1)
+        }
+        while (head < tail) {
+            val idx = queue[head++]
+            val x = idx % w
+            val y = idx / w
+            if (x > 0) push(idx - 1)
+            if (x < w - 1) push(idx + 1)
+            if (y > 0) push(idx - w)
+            if (y < h - 1) push(idx + w)
+        }
+        val out = mask.copyOf()
+        for (i in 0 until n) {
+            if (!mask[i] && !reachable[i]) out[i] = true
+        }
+        return out
     }
 
     /**

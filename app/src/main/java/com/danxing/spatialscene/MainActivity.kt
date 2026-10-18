@@ -25,6 +25,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
@@ -263,6 +264,8 @@ private fun PhotoTab() {
             1 -> depthBitmap ?: original
             2 -> soft?.foregroundAlpha ?: original
             3 -> soft?.backgroundImage ?: original
+            4 -> soft?.holeMask ?: original
+            5 -> soft?.maskOverlay ?: original
             else -> original
         }
         if (preview != null) {
@@ -278,7 +281,10 @@ private fun PhotoTab() {
                         contentScale = ContentScale.Fit
                     )
                     if (depthBitmap != null) {
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Row(
+                            modifier = Modifier.horizontalScroll(rememberScrollState()),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
                             FilterChip(
                                 selected = previewMode == 0,
                                 onClick = { previewMode = 0 },
@@ -298,6 +304,16 @@ private fun PhotoTab() {
                                 selected = previewMode == 3,
                                 onClick = { if (soft != null) previewMode = 3 },
                                 label = { Text("背景板/AI") }
+                            )
+                            FilterChip(
+                                selected = previewMode == 4,
+                                onClick = { if (soft != null) previewMode = 4 },
+                                label = { Text("AI 洞") }
+                            )
+                            FilterChip(
+                                selected = previewMode == 5,
+                                onClick = { if (soft != null) previewMode = 5 },
+                                label = { Text("遮罩叠加") }
                             )
                         }
                         if (soft == null) {

@@ -94,6 +94,8 @@ camX = +k·n.x, camY = +k·n.y
   `TensorInfo.shape` 判断 `shape[1]==3`(NCHW) 还是 `shape[3]==3`(NHWC)
 - `pushPull()` 内部按 `idx*3` 寻址（RGB 交错）。**单通道（深度）必须先 `pushPullGray()` 打包成 3 通道**，
   否则必崩 `ArrayIndexOutOfBoundsException: length=n; index=n+…`（v0.6~v0.9.0 一直踩这个坑）
+- 遮罩收尾（v0.9.8 起）：阈值 → 连通块清理 → **闭运算（2% 长边）桥接阴影缺口** →
+  **洞填充（不连通画面边缘的背景块并入主体）**。策略="宁可多包"
 - 分层参数（v0.9.4 起）：
   - 前景 alpha **不羽化**（羽化带会把两层不同位移混合 → "液态玻璃"重影）
   - AI 只补**环带**：`band = mask ∧ ¬erode(mask, 6% 长边)`，细长主体自动退化为整块
