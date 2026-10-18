@@ -88,32 +88,14 @@ class PhotoProgram {
 
             uniform vec2 uScale;
             uniform vec2 uOffset;
-            uniform vec2 uCam;
-            uniform float uParallax;
-            uniform float uGamma;
-            uniform float uUseDepthValue;
-            uniform float uDepthValue;
 
-            uniform sampler2D uDepthTex;
-
-            out vec2 vUv;
+            out vec2 vNdc;
 
             void main() {
-                vec2 uv = aPos * 0.5 + 0.5;
-                // Bitmap 第 0 行上传后在纹理 v=0（OpenGL 的底部），
-                // 所以采样时需要把 v 翻转，否则整幅图上下颠倒。
-                vec2 texUv = vec2(uv.x, 1.0 - uv.y);
-
-                float d = (uUseDepthValue > 0.5)
-                    ? uDepthValue
-                    : texture(uDepthTex, texUv).r;
-                d = pow(clamp(d, 0.0, 1.0), uGamma);
-
-                vUv = texUv;
-
+                // 只做 cover 缩放/平移；视差位移全部放到片元着色器里逐像素计算，
+                // 避免三角形跨越深度边界时把边缘"拉"出波浪（网格插值伪影）。
                 vec2 p = aPos * uScale + uOffset;
-                p += uCam * d * uParallax;
-
+                vNdc = p;
                 gl_Position = vec4(p, 0.0, 1.0);
             }
         """
@@ -121,20 +103,48 @@ class PhotoProgram {
         private const val FRAGMENT = """#version 300 es
             precision highp float;
 
-            in vec2 vUv;
+            in vec2 vNdc;
+            uniform vec2 uScale;
+            uniform vec2 uOffset;
+            uniform vec2 uCam;
+            uniform float uParallax;
+            uniform float uGamma;
+            uniform float uUseDepthValue;
+            uniform float uDepthValue;
+
             uniform sampler2D uImageTex;
+            uniform sampler2D uDepthTex;
             uniform sampler2D uAlphaTex;
             uniform float uUseAlpha;
             uniform float uVignette;
             out vec4 fragColor;
 
+            vec2 ndcToTex(vec2 ndc) {
+                vec2 aPos = (ndc - uOffset) / uScale;
+                vec2 uv = aPos * 0.5 + 0.5;
+                // Bitmap 第 0 行上传后在纹理 v=0（OpenGL 底部），需要翻转 v
+                return vec2(uv.x, 1.0 - uv.y);
+            }
+
             void main() {
-                vec3 col = texture(uImageTex, vUv).rgb;
+                // 1) 先用"未位移"的纹理坐标取深度
+                vec2 t0 = ndcToTex(vNdc);
+                vec2 t0c = clamp(t0, vec2(0.0), vec2(1.0));
+                float d = (uUseDepthValue > 0.5)
+                    ? uDepthValue
+                    : texture(uDepthTex, t0c).r;
+                d = pow(clamp(d, 0.0, 1.0), uGamma);
+
+                // 2) 逐像素位移：屏幕位移 = uCam * d * uParallax
+                vec2 tuv = ndcToTex(vNdc - uCam * d * uParallax);
+                tuv = clamp(tuv, vec2(0.0), vec2(1.0));
+
+                vec3 col = texture(uImageTex, tuv).rgb;
                 float a = 1.0;
                 if (uUseAlpha > 0.5) {
-                    a = texture(uAlphaTex, vUv).r;
+                    a = texture(uAlphaTex, tuv).r;
                 }
-                float vig = smoothstep(1.30, 0.55, length(vUv - 0.5));
+                float vig = smoothstep(1.30, 0.55, length(tuv - 0.5));
                 col *= mix(1.0 - uVignette, 1.0, vig);
                 fragColor = vec4(col, a);
             }
