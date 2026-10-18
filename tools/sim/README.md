@@ -23,15 +23,30 @@ pip install numpy onnxruntime opencv-python
 # 1=合成 2=深度 3=主体遮罩 4=背景板 5=AI洞 6=遮罩叠加 / P 保存截图 / ESC 退出
 python tools/sim/sim.py --image path/to/photo.jpg
 
-# 只导出调试图（无窗口，适合 CI / 远程查看）
-python tools/sim/sim.py --image photo.jpg --pack 768 --dump out/
+# 默认就会导出到「图片同目录 / <图片名>_sim/」，然后打开交互窗口
+python tools/sim/sim.py --image photo.jpg
+
+# 只导出、不开窗口
+python tools/sim/sim.py --image photo.jpg --dump-only
+
+# 指定输出目录（相对路径按图片目录解析）
+python tools/sim/sim.py --image photo.jpg --dump out
 
 # 跳过 AI（只测几何/遮罩）
 python tools/sim/sim.py --image photo.jpg --no-ai
 ```
 
-`--dump` 会输出 7 张：
-`01_composite 02_depth 03_mask 04_bg_ai 05_hole 06_overlay 07_composite_tilt`
+输出目录默认是 **图片同级的 `<图片名>_sim/`**（找得到、不用翻临时目录），包含 7 张图 + `说明.txt`：
+
+| 文件 | 内容 |
+|---|---|
+| `1_composite.png` | 合成（静止） |
+| `2_depth.png` | 深度图（亮=近） |
+| `3_mask.png` | 主体遮罩（白=主体） |
+| `4_background_ai.png` | 背景板 / AI 补全结果 |
+| `5_ai_hole.png` | AI 实际收到的洞（白=待补） |
+| `6_mask_overlay.png` | 遮罩叠加原图（红=主体） |
+| `7_composite_tilted.png` | 合成（倾斜 cam=0.10） |
 
 命令行会打印耗时与 **AI 改动**（洞内 AI 相对预填补的平均差异，0~255）。
 `AI 改动 < 2` 基本等于"AI 没在工作"。

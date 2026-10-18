@@ -326,20 +326,57 @@ def to_bgr(rgb):
     return cv2.cvtColor((np.clip(rgb, 0, 1) * 255).astype(np.uint8), cv2.COLOR_RGB2BGR)
 
 
+VIEW_NAMES = [
+    ('1_composite', '合成（静止）'),
+    ('2_depth', '深度图（亮=近）'),
+    ('3_mask', '主体遮罩（白=主体）'),
+    ('4_background_ai', '背景板 / AI 补全结果'),
+    ('5_ai_hole', 'AI 实际收到的洞（白=待补）'),
+    ('6_mask_overlay', '遮罩叠加在原图上（红=主体）'),
+    ('7_composite_tilted', '合成（倾斜 cam=0.10）'),
+]
+
+
+def resolve_out_dir(image_path, dump_arg):
+    """输出目录：默认放在图片同级的 <图片名>_sim/，可读好找。"""
+    if dump_arg == 'auto' or not dump_arg:
+        base = os.path.dirname(os.path.abspath(image_path))
+        stem = os.path.splitext(os.path.basename(image_path))[0]
+        return os.path.join(base, stem + '_sim')
+    if os.path.isabs(dump_arg):
+        return dump_arg
+    base = os.path.dirname(os.path.abspath(image_path))
+    return os.path.join(base, dump_arg)
+
+
 def dump(layers, out_dir, cam_x, cam_y, zoom):
     os.makedirs(out_dir, exist_ok=True)
     views = {
-        '01_composite': to_bgr(render(layers, cam_x, cam_y, zoom)[0]),
-        '02_depth': (layers['depth'] * 255).astype(np.uint8),
-        '03_mask': (layers['alpha'] * 255).astype(np.uint8),
-        '04_bg_ai': to_bgr(layers['bg_color']),
-        '05_hole': (layers['hole'] * 255).astype(np.uint8),
-        '06_overlay': to_bgr(layers['image'] * 0.5 + np.array([0.5, 0, 0]) * layers['alpha'][..., None]),
-        '07_composite_tilt': to_bgr(render(layers, 0.10, 0.0, zoom)[0]),
+        '1_composite': to_bgr(render(layers, cam_x, cam_y, zoom)[0]),
+        '2_depth': (layers['depth'] * 255).astype(np.uint8),
+        '3_mask': (layers['alpha'] * 255).astype(np.uint8),
+        '4_background_ai': to_bgr(layers['bg_color']),
+        '5_ai_hole': (layers['hole'] * 255).astype(np.uint8),
+        '6_mask_overlay': to_bgr(layers['image'] * 0.5 + np.array([0.5, 0, 0]) * layers['alpha'][..., None]),
+        '7_composite_tilted': to_bgr(render(layers, 0.10, 0.0, zoom)[0]),
     }
     for name, img in views.items():
         cv2.imwrite(os.path.join(out_dir, name + '.png'), img)
-    print(f'已导出 {len(views)} 张到 {out_dir}')
+    with open(os.path.join(out_dir, '说明.txt'), 'w', encoding='utf-8') as f:
+        f.write('空间场景模拟器输出\n\n')
+        for name, label in VIEW_NAMES:
+            f.write(f'{name}.png  =  {label}\n')
+        f.write('\n4_background_ai = 去掉主体后 AI 认为的背景\n')
+        f.write('5_ai_hole      = AI 实际收到的洞（白=待补）\n')
+        f.write('6_mask_overlay = 红色标出的主体范围\n')
+    print('')
+    print('=' * 60)
+    print(f'已导出 {len(views)} 张到：')
+    print('  ' + out_dir)
+    print('=' * 60)
+    for name, label in VIEW_NAMES:
+        print(f'  {name}.png  ->  {label}')
+    print('')
 
 
 def main():
@@ -348,7 +385,10 @@ def main():
     ap.add_argument('--image', required=True)
     ap.add_argument('--pack', type=int, default=PACK_LONG_SIDE)
     ap.add_argument('--no-ai', action='store_true')
-    ap.add_argument('--dump', default=None)
+    ap.add_argument('--dump', nargs='?', const='auto', default='auto',
+                    help='输出目录（默认: 图片同级的 <图片名>_sim/）')
+    ap.add_argument('--dump-only', action='store_true', help='只导出图片，不开窗口')
+    ap.add_argument('--no-dump', action='store_true', help='不导出，只开交互窗口')
     ap.add_argument('--zoom', type=float, default=1.25)
     ap.add_argument('--cam', type=float, nargs=2, default=(0.0, 0.0))
     args = ap.parse_args()
@@ -369,8 +409,10 @@ def main():
     t2 = time.time()
     print(f'深度 {t1 - t0:.2f}s · 分层 {t2 - t1:.2f}s · AI 改动 {layers["ai_delta"]:.1f}')
 
-    if args.dump:
-        dump(layers, args.dump, args.cam[0], args.cam[1], args.zoom)
+    out_dir = resolve_out_dir(args.image, args.dump)
+    if not args.no_dump:
+        dump(layers, out_dir, args.cam[0], args.cam[1], args.zoom)
+    if args.dump_only:
         return
 
     cam_x, cam_y = args.cam
@@ -415,9 +457,10 @@ def main():
         elif ord('1') <= k <= ord('6'):
             mode = k - ord('1')
         elif k in (ord('p'), ord('P')):
-            name = f'sim_{int(time.time())}.png'
+            os.makedirs(out_dir, exist_ok=True)
+            name = os.path.join(out_dir, f'shot_{int(time.time())}.png')
             cv2.imwrite(name, img_show)
-            print('saved', name)
+            print('已保存:', name)
         cam_x += (tx - cam_x) * 0.2
         cam_y += (ty - cam_y) * 0.2
     cv2.destroyAllWindows()
