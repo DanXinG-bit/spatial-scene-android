@@ -26,6 +26,8 @@ object SoftLayerDecomposer {
 
     private const val TAG = "SpatialScene"
     private const val PACK_LONG_SIDE = 1024
+    /** 背景层深度压缩系数：越小背景越"刚体"（不弯），但纵深越弱 */
+    private const val BG_DEPTH_SCALE = 0.3f
     private const val MIN_MASK_FRACTION = 0.03f
     private const val MAX_MASK_FRACTION = 0.90f
 
@@ -121,13 +123,16 @@ object SoftLayerDecomposer {
             val footprint = filter(maskFloat, w, h, 2, min = false)
             val validFoot = FloatArray(n) { if (footprint[it] > 0.5f) 0f else 1f }
             var fill = pushPull(colors.copyOf(), validFoot, w, h)
+            // 注意：AI 看到的上下文必须是"真实背景"，所以洞 = 整个脚印。
+            // 之前的"只补环带"实验把糊的预填补当成了已知上下文 → 输出更糊。
 
             // 4) AI 只补环带（洞小 → 内容更实）
             stage = "ai"
             var aiFilled = false
             val aiStart = System.currentTimeMillis()
             if (bandCount > 0) {
-                val ai = InpaintEstimator.inpaint(context, fill, band, w, h)
+                val aiHole = BooleanArray(n) { footprint[it] > 0.5f }
+                val ai = InpaintEstimator.inpaint(context, fill, aiHole, w, h)
                 if (ai != null) {
                     fill = ai
                     aiFilled = true
@@ -156,7 +161,10 @@ object SoftLayerDecomposer {
             //    push-pull 会在脚印内形成碗形 → 背景被透镜式弯折、直线变弧。
             stage = "bgDepth"
             val validBg = FloatArray(n) { if (footprint[it] > 0.5f) 0f else 1f }
-            val bgDepth = nearestFill(d, validBg, w, h)
+            // 背景层深度压缩到 [0, 0.3]：层内深度梯度小 3 倍 → 背景不会"被透镜弯"
+            val bgDepth = nearestFill(d, validBg, w, h).let { raw ->
+                FloatArray(n) { raw[it] * BG_DEPTH_SCALE }
+            }
 
             // 7) 前景层深度：遮罩内 = 原始深度，遮罩外 = 边缘外延（无悬崖）
             stage = "fgDepth"
