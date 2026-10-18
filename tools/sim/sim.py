@@ -388,6 +388,7 @@ def main():
     ap.add_argument('--dump', nargs='?', const='auto', default='auto',
                     help='输出目录（默认: 图片同级的 <图片名>_sim/）')
     ap.add_argument('--dump-only', action='store_true', help='只导出图片，不开窗口')
+    ap.add_argument('--open-folder', action='store_true', help='导出后自动打开输出文件夹')
     ap.add_argument('--no-dump', action='store_true', help='不导出，只开交互窗口')
     ap.add_argument('--zoom', type=float, default=1.25)
     ap.add_argument('--cam', type=float, nargs=2, default=(0.0, 0.0))
@@ -412,6 +413,11 @@ def main():
     out_dir = resolve_out_dir(args.image, args.dump)
     if not args.no_dump:
         dump(layers, out_dir, args.cam[0], args.cam[1], args.zoom)
+    if args.open_folder and sys.platform.startswith('win'):
+        try:
+            os.startfile(out_dir)
+        except Exception as e:
+            print('打开文件夹失败:', e)
     if args.dump_only:
         return
 
@@ -436,18 +442,20 @@ def main():
             img_show = to_bgr(layers['image'] * 0.5 + np.array([0.5, 0, 0]) * layers['alpha'][..., None])
         cv2.putText(img_show, f'{titles[mode]}  shift=({sx:.0f},{sy:.0f})px', (12, 28),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
+        cv2.putText(img_show, f'cam=({cam_x:+.2f},{cam_y:+.2f}) target=({tx:+.2f},{ty:+.2f})',
+                    (12, 56), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 1)
         cv2.imshow('spatial-sim', img_show)
         k = cv2.waitKey(16) & 0xFF
         if k == 27:
             break
         elif k in (ord('w'), ord('W')):
-            ty += 0.03
+            ty = min(0.30, ty + 0.02)
         elif k in (ord('s'), ord('S')):
-            ty -= 0.03
+            ty = max(-0.30, ty - 0.02)
         elif k in (ord('a'), ord('A')):
-            tx -= 0.03
+            tx = max(-0.30, tx - 0.02)
         elif k in (ord('d'), ord('D')):
-            tx += 0.03
+            tx = min(0.30, tx + 0.02)
         elif k in (ord('q'), ord('Q')):
             args.zoom = max(1.0, args.zoom - 0.02)
         elif k in (ord('e'), ord('E')):
